@@ -49,3 +49,11 @@
 ## 主机脚本验证
 
 运行 `pwsh -NoProfile -File tools/validation/device/Test-Collector.ps1`。可控 fake adb 验证缺少工具时失败、无设备、未授权、多设备、adb 查询失败及单台设备下部分 appops 不支持的路径；确认输出保持 NOT_VERIFIED 且不包含设备序列号。2026-10-24 上述检查通过，PowerShell AST 解析无错误。这仅验证采集脚本行为，不代表 Android 平台或 OPPO 能力通过。
+
+## 官方 portable adb 补充核查
+
+2026-10-24 从 `https://dl.google.com/android/repository/platform-tools-latest-windows.zip` 下载到仓库外任务缓存，未安装到系统 PATH，未接受 SDK 许可证、安装应用或改设备设置。实际版本：Android Debug Bridge 1.0.41，platform-tools 37.0.1-15733141，Windows 10.0.19045。
+
+调用 `adb devices` 退出码为 0，设备行计数为 0，无 device、unauthorized 或 offline 条目。该结果只说明此刻 adb 未发现设备，不能证明手机物理上未接入；仍可能缺少 USB 调试、驱动或数据连接。未输出或保存设备序列号。未调用 tcpip/connect、授权、权限修改、重启或应用安装。因没有单台已授权设备，未执行设备属性采集，未生成真实手机证据。
+
+用户提供的设备名称为 **OPPO Reno10 5G**、厂商系统版本为 **ColorOS 15.0**，尚未由设备属性核验；Android 版本和型号代码仍未知，不从 ColorOS 名称推断 Android 版本。所有平台能力验收继续保持未验证，T02 未完成。
