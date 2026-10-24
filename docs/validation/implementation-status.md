@@ -1,8 +1,8 @@
 # 首版实施状态
 
-规格：[#1](https://github.com/shangyunqiang1/ZhiDeer/issues/1)。集成分支：`codex/mvp-integration`，起点 `c594097168f0aea29a3ad3a2a16205429af28586`。状态日期：2026-10-24（Asia/Shanghai）。
+规格：[#1](https://github.com/shangyunqiang1/ZhiDeer/issues/1)。集成分支：`codex/mvp-integration`，起点 `c594097168f0aea29a3ad3a2a16205429af28586`。状态日期：2026-10-25（Asia/Shanghai）。
 
-本轮已启动实施工作流，但尚未完成任何完整 ticket。工程基线验证与 OPPO 设备验证是当前 frontier；准备脚本、源码调查或报告审查通过均不等于这两个任务验收通过。未满足前置条件时不启动下游产品实现，不关闭规格或子任务。
+2026-10-25：[#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) 验收条件已满足——固定 MyBrain 提交真实构建通过、持久化写入重读探针通过、工程基线确定为独立实现；issue 待关闭。[#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) 设备信息已核验但运行能力未验证，且早期证据 JSON 因 Temp 清理丢失需重采。无产品代码提交；探针与全部工具位于仓库外 `G:/ZhiDeer-tools`。
 
 工程证据见 [T01](t01-engineering-baseline.md)，设备准备与证据见 [T02](t02-oppo-device.md)。目标手机 OPPO Reno10 5G 已通过 USB 调试授权，实际读取型号代码 PHW110、Android 15/API 35、ColorOS V15.0.0；通知、语音与系统时钟的运行能力仍待验证。没有已交付的产品 APK。
 
@@ -12,7 +12,7 @@
 
 | Ticket | 目标 | 前置任务 | 本地状态 |
 | --- | --- | --- | --- |
-| [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) | [T01] 验证并确定工程基线 | 无 | 验证中，未完成 |
+| [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) | [T01] 验证并确定工程基线 | 无 | 验证完成（2026-10-25）：构建通过+探针通过+基线=独立实现；待关闭 |
 | [#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) | [T02] 验证 OPPO 设备能力 | 无 | 验证中，未完成 |
 | [#4](https://github.com/shangyunqiang1/ZhiDeer/issues/4) | [T03] 离线管理单次待办 | #2 | 未启动 |
 | [#5](https://github.com/shangyunqiang1/ZhiDeer/issues/5) | [T04] 管理本地日历安排 | #2 | 未启动 |
@@ -51,8 +51,8 @@
 
 ## 继续执行
 
-1. 完成固定 MyBrain 提交的真实构建和本地持久化写入重读验证，并依据差异与许可证核查确定工程基线；不能用另一套数据库实现代替上游验证。
-2. OPPO 已授权 USB 调试并完成设备信息采集，在工程可构建后继续运行能力探针和实机测试。采集设备信息本身不证明通知、语音或系统时钟行为。
+1. [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) 验收条件已满足（2026-10-25，证据见 [T01](t01-engineering-baseline.md) 末章）：固定提交真实构建 BUILD SUCCESSFUL、文件级 Room 写入→关闭→重开→重读探针 PASSED、androidHostTest 62/62、工程基线确定为独立实现。待关闭（gh 无凭据，需用户 `gh auth login` 或手动关闭）。下游 #4/#5/#6/#18/#25 据此解锁。
+2. OPPO 已授权 USB 调试；设备证据 JSON 因 Temp 清理丢失，实机重连后重新采集，并以独立 probe APK 完成通知、精确提醒、重启恢复、语音与系统时钟的运行验证（[T02](t02-oppo-device.md)）。
 3. 仅当相应前置任务真正完成后推进依赖图；实现使用统一业务用例入口、真实持久化及受控平台适配器验证，交付时另补必要实机证据。
 4. 每个实现单元在独立 worktree 中基于集成分支执行，合并前同步集成分支；审查并验证后再按任务跟踪约定关闭已满足验收条件的任务。
 

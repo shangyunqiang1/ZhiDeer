@@ -4,7 +4,9 @@
 
 ## 结论与门槛
 
-**未通过，#2 仍未完成，尚未选定产品工程基线。** 已固定并实际检出 MyBrain，完成源码规则核查；首次构建在 Java 启动前置检查失败；后续已补齐并校验 portable JDK 21，随后通过官方包校验及进程代理启动 Gradle，最终失败于 Kotlin compiler artifact 的 TLS 下载，未运行测试、未生成 APK、未演示真实数据库写入重读。不得据此启动依赖基线的下游产品实现。
+**构建与最小持久化验证已通过（2026-10-25）；工程基线已确定为独立实现，不改造 MyBrain；#2 验收条件已满足，待按 tracker 约定关闭。** 固定提交 `96cd36d40effd42bacb0cc25c8b6bf2a88a4d657` 上 `testAndroidHostTest :androidApp:assembleRelease` 实际 BUILD SUCCESSFUL（864 任务），产出未签名 Release APK；文件级真实 Room「写入→关闭→重开→重读」探针通过；全模块 androidHostTest 62/62 通过。详细证据见文末「2026-10-25 构建通过与持久化探针（最终结论）」。
+
+独立实现属规格授权 Root 自主决定的技术方案；如未来改选 MyBrain 改造路线，须先获用户对 GPLv3 衍生分发义务的明确确认。历史记录：2026-10-24 的调查与多次构建失败（Java 缺失、TLS、Temp 清理、C 盘满盘）按原样保留在下文。
 
 建议在工具链恢复后先完成固定版本的构建及持久化探针，再决定：接受 GPL 分发约束并重构 MyBrain，或独立实现 Android 应用。源码证据显示后者更贴合本规格，但这是建议，不能把未验证的方案当作已选基线。
 
@@ -139,3 +141,62 @@ BUILD FAILED in 11m 25s
 交接时无构建或下载会话仍运行。原始上游检出保持未修改；工具、日志、下载包及Gradle缓存全部保留在仓库外任务目录 `C:/Users/linlin/AppData/Local/Temp/zhideer-t01-tools`。下一会话可复用相同JAVA_HOME、GRADLE_USER_HOME以及任务cache中已配置的进程代理，再执行上述构建命令；wrapper已缓存，不必重复下载。
 
 Root 已收到用户授权接受 Android SDK 许可并安装用户级 SDK，但本子任务未下载或安装 SDK，也未运行 sdkmanager。Root 另已核验实机 PHW110 / Android15 / API35 / ColorOS V15.0.0 / Asia/Shanghai，设备能力结果以 T02 报告为准。本报告不将设备连通当作通知、语音或系统闹钟验收通过。
+
+
+## 2026-10-25 构建通过与持久化探针（最终结论）
+
+### 环境事故与恢复
+
+- Temp 目录 `C:/Users/linlin/AppData/Local/Temp` 被系统自动清理，前一轮保留的 JDK、Gradle 缓存（含手动放置的 kotlin-compiler JAR）、MyBrain 检出、T02 设备证据 JSON 全部丢失。首次续跑因检出目录不存在而静默退出。
+- 全部工具迁至持久目录 `G:/ZhiDeer-tools` 并重新走官方渠道获取，逐一校验：
+  - JDK 21（Microsoft `microsoft-jdk-21.0.12.1-windows-x64.zip`，201096952 bytes，SHA256 `192441a9d27da813bada974bb88b4cf64d37a9589ed37f204374d411ca5ce07f` 与官方 `.sha256sum.txt` 一致）→ `G:/ZhiDeer-tools/jdk21/jdk-21.0.12.1+1`。
+  - Gradle 9.6.1（140682664 bytes，SHA256 `9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14` 与官方 `.sha256` 一致；直连 services.gradle.org 过慢，最终经本地代理完整下载并按官方校验值验证；镜像渠道未采用）→ 预置 `G:/ZhiDeer-tools/gradle-user-home/wrapper/dists/gradle-9.6.1-bin/4ticwg1pgcbps2hj28r8so764/`。
+  - MyBrain 重新克隆并检出同一固定提交 `96cd36d40effd42bacb0cc25c8b6bf2a88a4d657`（2026-10-03T09:40:15+03:00，Merge PR #398）→ `G:/ZhiDeer-tools/mybrain-t01`。
+- C 盘满盘（0 GB 空闲）导致 R8 写 `mapping.txt` 抛 `java.io.IOException`（native write0 失败）——构建失败根因之一，不是代码问题。工具链迁移到 G 盘后解决。
+
+### Android SDK 安装（用户级，已获用户授权接受许可）
+
+- 位置 `G:/ZhiDeer-tools/android-sdk`（原装于 `C:/Users/linlin/AppData/Local/Android/Sdk`，后随工具链迁移）。
+- cmdline-tools 23.0：`commandlinetools-win-16111833_latest.zip`，154957218 bytes，SHA1 `57d04f2d75eb8e8fffc5000a987e5de4b5a63e9d` 与官方 repository XML 元数据一致（studio 页面 JS 渲染无法提取 SHA256，以官方元数据大小+SHA1 为准，如实记录）。
+- 已装组件：`platform-tools 37.0.1`、`platforms;android-37.0 (r02)`、`build-tools;37.0.0`；许可文件 `licenses/android-sdk-license` 已接受。构建中 AGP 9.3.0 因许可已接受自动补装其所需 `Build-Tools 36 v.36.0.0`。
+
+### 网络结论（如实记录，未降低 TLS 要求、未更换任何依赖版本）
+
+- 直连 Maven Central：TCP 可建立但数据传输停滞（Gradle 多连接全部空转，CPU 空闲等待）。
+- 经本地代理（仅本地回环地址，配置在仓库外 `G:/ZhiDeer-tools/gradle-user-home/gradle.properties`，不写入本仓库）：Maven Central 解析正常；个别 artifact 间歇性 TLS 握手被远端终止（昨日 repo.maven.apache.org 的 kotlin-compiler-embeddable、今日 dl.google.com 的 annotation-jvm-1.9.1）。
+- dl.google.com 直连始终快速可靠。最终网络策略：gradle.properties 配代理 + `systemProp.http(s).nonProxyHosts` 将 Google 域名排除走直连；另配 `org.gradle.internal.repository.max.tentatives=10` 提高下载韧性。
+
+### 构建结果（固定提交，可复现）
+
+入口：`G:/ZhiDeer-tools/run-build-direct.ps1`（进程级 JAVA_HOME/GRADLE_USER_HOME/ANDROID_HOME，不改全局 PATH；上游检出不修改）。命令：`gradlew.bat testAndroidHostTest :androidApp:assembleRelease --no-daemon`。
+
+- 结果：**BUILD SUCCESSFUL in 6m 1s；864 actionable tasks（559 executed, 172 from cache, 133 up-to-date）**。
+- 产物：`androidApp/build/outputs/apk/release/androidApp-release-unsigned.apk`，16145949 bytes，SHA256 `0df60b31ef054d6039f2ddc8ed2b71c78ad56a68eb7405aad361df57f97198d6`（未签名，仅作构建链路证据，不作为产品交付）。
+- 全部模块 androidHostTest 汇总：**62 tests，0 failures，0 errors**（含 core/database 的 Migration6To7Test 3、PagingQueriesTest 9、PairedDeviceAcknowledgementTest 5、TaskDueDateSerializationTest 4、TombstoneRetentionTest 4）。
+- 构建日志：`G:/ZhiDeer-tools/logs/mybrain-build-direct.log`。
+
+### 持久化探针（#2 验收核心）
+
+探针 `TaskPersistenceReopenProbeTest`（源码存档于 `G:/ZhiDeer-tools/probe-src/`，运行时临时放入上游检出 `core/database/src/androidHostTest`，运行后已移除，检出恢复完全干净）。Robolectric SDK 36 + 文件级真实 Room 库（复用上游 `DatabaseModule` 相同的建库方式：绝对路径 + `AndroidSQLiteDriver` + `onCreate` 写入 sync_state 种子行）。
+
+路径与 `TaskRepositoryImpl.upsertTask` 的持久化路径逐层对应：`RoomDatabaseTransactionProvider.runInTransaction` → `syncDao.incrementAndGet()` 取 sync_seq → `TaskDao.upsertTask(toTaskEntity(...))`（与仓库实现相同的映射函数）。随后 `getTask(id)` 同会话读取、`db.close()`、以同一文件重建数据库、再次 `getTask(id)` 断言 id/title/priority/dueDate/isCompleted 一致。
+
+结果：**PASSED**（测试 XML `failures="0"`，system-out 记录 `ZHIdeer-T01-PROBE: write -> close -> reopen -> read-back PASSED`，耗时 23.6s）。
+
+范围声明：探针覆盖持久化 seam（事务+同步序列+DAO+映射），未直接调用 `UpsertTaskUseCase`——其告警调度与小组件更新边缘属平台行为，由 T02 设备验证覆盖；该用例与仓库层入口的静态核查见上文源码证据表。探针运行需要网络下载 Robolectric android-all SDK 36 运行时。
+
+### 工程基线决定：独立实现
+
+依据（均为已验证事实或固定提交源码证据）：
+
+1. 上游在规格核心边界存在结构性差距：日程依赖系统日历（`CalendarRepositoryImpl` 用 CalendarContract）、单一 alarmId 与自动提醒（`shouldScheduleAlarm` 对未来 dueDate 自动调度）、重复实例推进复用同一记录（与"每次独立保留历史"冲突）、AI 工具调用直接执行（无确认凭证/提案执行门槛）。改造=重写核心边界，成本高于新建。
+2. GPLv3：复制改造将使未来产品分发承担 GPL 义务，属需用户人工确认的取舍；独立实现规避该约束。
+3. 本轮已验证本机可复现的 Android 构建链路（JDK/Gradle/AGP/SDK/测试/打包全通），独立实现无工具链风险。
+
+后续最低系统版本与依赖选型不在本报告定值：minSdk 结合 T02 目机实测（Android 15/API 35）与拟用依赖在 T03 基线实施时确定。独立实现的依赖集合仍须做许可证审计（记录为交付前事项，非 #2 阻塞项）。
+
+### 遗留事项
+
+- #2 关闭：gh 不在 PATH、无 token、无 gh hosts，本会话无法调用 GitHub API 关闭。需用户运行 gh auth login 后由代理关闭，或用户手动关闭；关闭评论建议引用本报告与探针证据。
+- T02 设备证据 JSON 因 Temp 清理丢失；设备属性（PHW110 / Android 15 / API 35 / ColorOS V15.0.0）以本报告与 T02 报告文字记录为准，实机重连后应重新采集。
+- 依赖许可证全量审计：未完成，作为下游交付前事项跟踪。
