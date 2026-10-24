@@ -63,3 +63,9 @@
 用户随后两次报告“已连接”。Root 在每次报告后使用相同 portable adb 实际复查，`adb devices` 均退出码 0、设备行数 0；Root 使用 `Get-PnpDevice` 查询时未找到名称包含 OPPO、Android、ADB 或 MTP 的设备。以上是当前主机可见性证据，不将用户所说的连接视为 USB 调试已核验，也不据此断定驱动、数据线或其他具体故障原因。
 
 已向用户提供检查 USB 调试、文件传输模式、手机授权弹窗及数据线的建议；尚无手机属性或设备能力数据。通知、准时提醒、重启恢复、语音及系统时钟继续未验证，T02 不关闭。
+
+## 后续 USB 数据连接新证据
+
+在上述未发现 PnP 名称的检查之后，Root 再次执行 `Get-PnpDevice`，现已观察到 **Status OK / Class WPD / FriendlyName OPPO Reno10 5G**。这表明此时 Windows 已识别手机的 USB 数据连接，不能继续沿用早先“未发现手机 PnP 条目”的状态作为当前结论。
+
+同一次检查中，`adb devices` 仍退出码 0、设备行数 0；`ADB_SERVER_SOCKET` 与 `ANDROID_ADB_SERVER_PORT` 均未配置。因此，USB 数据设备现已可见，但 ADB 调试设备尚未出现，原因未确定。用户已被询问 USB 调试开关和授权状态，当前尚未回答。未取得手机属性或设备能力测试证据，T02 仍未完成。
