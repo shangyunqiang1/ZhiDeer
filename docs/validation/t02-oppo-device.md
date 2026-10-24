@@ -1,5 +1,7 @@
 # T02 OPPO 设备验证准备
 
+**当前状态（2026-10-24 22:33，Asia/Shanghai）**：手机已通过 USB 调试授权，单台 ADB 设备及设备元数据已核验；已完成只读 handler 发现。通知投递、准时提醒、重启恢复、语音和系统时钟运行验收仍未验证，尚无 probe APK，T02 未完成。以下历史记录按检查先后保留。
+
 关联：https://github.com/shangyunqiang1/ZhiDeer/issues/3；规格 #1，用户故事39–48、65–70、90。
 
 状态：未验证。2026-10-24 检查当前 PATH 未发现 adb；ANDROID_HOME 和 ANDROID_SDK_ROOT 未提供有效路径；常见 SDK 位置 C:\Users\linlin\AppData\Local\Android\Sdk、C:\Android\Sdk、G:\Android\Sdk 均不存在。没有调用 adb，不能断言没有连接手机。型号、Android/ColorOS 版本、应用构建基线均待提供。
@@ -82,3 +84,34 @@
 官方来源：[OPPO 开启开发者选项说明](https://support.oppo.com/au/answer/?aid=neu9332)、[OPPO USB 调试说明](https://support.oppo.com/en/answer/?aid=neu7554)。
 
 以上仅记录已提供给用户的可复现接入步骤，不表示已启用 USB 调试、已授权此电脑或完成任何 Android 平台能力验证。本次文档补充未重复底层设备检测，T02 继续未完成。
+
+
+## USB 授权成功后的设备及 handler 核查
+
+2026-10-24 22:32（Asia/Shanghai），Root 实际采集到单台已授权设备，设备查询退出码为 0。仓库外证据 `reno10-evidence.json` 核验如下：
+
+| 属性 | 实际结果 |
+|---|---|
+| 厂商／型号代码 | OPPO／PHW110 |
+| Android／API level | 15／35 |
+| 安全补丁 | 2026-09-01 |
+| ro.build.version.oplusrom | V15.0.0 |
+| 时区 | Asia/Shanghai |
+| low_power | 0（采集时系统低电量模式标志，不能代表所有厂商后台限制均关闭） |
+| 默认识别服务设置 | 空值 |
+| 默认 TTS 设置 | null |
+
+用户提供的市场名称为 OPPO Reno10 5G；设备代码和 Android 版本现已有真实属性证据。以上新状态取代前文“未发现 ADB 设备／尚未授权”的当前结论，历史检查结果仍保留。
+
+22:33:45，执行 `adb shell cmd package help` 确认语法后，使用 `query-services/query-activities --components --user current -a <action>` 仅查询当前用户的公开 intent handlers，各次退出码均为 0：
+
+| 查询 | Action | 结果 |
+|---|---|---|
+| query-services | android.speech.RecognitionService | No services found |
+| query-services | android.intent.action.TTS_SERVICE | 发现1个 TTS 服务 |
+| query-activities | android.intent.action.SET_ALARM | 发现系统时钟处理器 |
+| query-activities | android.intent.action.SHOW_ALARMS | 发现系统时钟处理器 |
+
+完整组件查询证据仅留在仓库外 `reno10-handler-evidence.json`。识别查询未发现标准服务，是后续缺少引擎回退测试的线索，不扩大为设备不存在任何语音产品的结论。TTS handler 存在而默认设置为 null，仍须通过应用实际初始化、中文语言检查和播报验证；系统时钟 handler 存在也不证明交接或保存已成功。shell 查询不能替代应用 UID 下的能力检查与 manifest 可见性配置验证。
+
+本轮未启动任何闹钟、录音或播报，未安装应用、修改权限、重启手机或读取私人记录；不含设备唯一标识。尚无可运行 probe APK，通知、准时提醒、重启恢复、省电、麦克风回退、中文播报和系统闹钟实际交接均继续未验证，不能关闭 #3。
