@@ -52,7 +52,7 @@
 ## 继续执行
 
 1. [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) 验收条件已满足（2026-10-25，证据见 [T01](t01-engineering-baseline.md) 末章）：固定提交真实构建 BUILD SUCCESSFUL、文件级 Room 写入→关闭→重开→重读探针 PASSED、androidHostTest 62/62、工程基线确定为独立实现。待关闭（gh 无凭据，需用户 `gh auth login` 或手动关闭）。下游 #4/#5/#6/#18/#25 据此解锁。
-2. OPPO 已授权 USB 调试；设备证据 JSON 因 Temp 清理丢失，实机重连后重新采集，并以独立 probe APK 完成通知、精确提醒、重启恢复、语音与系统时钟的运行验证（[T02](t02-oppo-device.md)）。
+2. OPPO 已授权 USB 调试；独立能力探针应用已实现并构建成功（`tools/validation/device/probe-app`，见 [T02](t02-oppo-device.md)），但未实机运行。实机重连后重新采集设备证据并执行 D01–D10：通知、精确提醒、重启恢复、语音与系统时钟仍全部未验证，[#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) 不关闭。
 3. 仅当相应前置任务真正完成后推进依赖图；实现使用统一业务用例入口、真实持久化及受控平台适配器验证，交付时另补必要实机证据。
 4. 每个实现单元在独立 worktree 中基于集成分支执行，合并前同步集成分支；审查并验证后再按任务跟踪约定关闭已满足验收条件的任务。
 

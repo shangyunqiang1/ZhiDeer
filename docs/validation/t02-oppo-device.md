@@ -37,6 +37,16 @@
 
 工程基线确定后，独立 probe APK 应仅使用合成数据，提供应用内能力快照：通知总开关和渠道状态、API 支持时 canScheduleExactAlarms、识别服务可用性、中文 TTS 初始化/语言结果、系统时钟 intent 是否有处理器；再提供由用户显式触发的通知调度和系统时钟交接。应用层快照和真实设备投递须分开保存。当前只交付主机采集脚本与验收方案，尚无编译运行的 probe APK，不满足 T02 完整验收。
 
+## 探针应用已实现并构建（2026-10-25，未实机运行）
+
+源码已合入集成分支：`tools/validation/device/probe-app/`（独立 Gradle 工程，纯 Java、无 AndroidX、minSdk 29 / target+compileSdk 37，仅合成测试数据）。debug APK 已实际构建成功（`BUILD SUCCESSFUL in 1m 22s`，33 任务；构建日志 `G:/ZhiDeer-tools/logs/probe-build.log`）。
+
+- 快照（只读）：厂商/型号/Android/补丁/ColorOS 属性、通知总开关与渠道、canScheduleExactAlarms（API 31+）、`SpeechRecognizer.isRecognitionAvailable` 与 RecognitionService 组件、默认 TTS 引擎设置、SET_ALARM/SHOW_ALARMS 处理器。
+- 显式动作：请求通知权限、立即测试通知、2 分钟精确提醒（接收器记录预定 vs 实际投递毫秒偏差，供 D01/D02）、取消提醒、中文 TTS 初始化+`isLanguageAvailable(zh_CN)`+合成播报（D08）、识别服务可用性（D07 线索）、SET_ALARM 预填交接（SKIP_UI=false，由用户在时钟界面确认保存，D09）、打开系统时钟列表。
+- 结果同时写入 logcat（tag `ZhideerProbe`）与界面文本，便于截图与 `adb logcat -s ZhideerProbe` 采集；应用层快照与真实投递分开记录。
+- 构建方式：`G:/ZhiDeer-tools/run-probe-build.ps1`（进程级环境变量；APK 位于 `probe-app/app/build/outputs/apk/debug/app-debug.apk`）。
+- **未实机安装或运行**：通知、精确提醒、重启恢复、省电、语音、系统时钟的真实行为仍全部未验证。D01–D10 须在 OPPO 实机重连后按上文验收记录模板逐项执行，T02 不因此关闭。
+
 最低 Android 版本需结合基线依赖、真实设备 API level 及目标能力决定，目前不定值。
 
 ## 官方依据
