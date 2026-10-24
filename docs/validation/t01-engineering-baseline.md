@@ -72,3 +72,11 @@ wrapper 未启动 Gradle，因此目前不能确认任务配置、依赖解析�
 ```
 
 之后必须补充统一 use case -> 真实 Room 写入 -> 关闭数据库 -> 重开 -> 查询相同记录的探针，并保留输出；不能用 Python SQLite 仿制 schema 代替上游持久化验证。完成依赖审计、与规格差异验证后再记录所选工程基线及后续构建测试命令。当前没有安装大型工具链，也没有宣称上述待办完成。
+
+### 精确依赖审计起点（未批准复用）
+
+以下为固定版本清单中的直接依赖坐标与版本样本，**仅核实坐标，不代表核实其授权**：`androidx.room3:room3-runtime:3.0.0`、`androidx.sqlite:sqlite-bundled:2.7.0`、`org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0`、`org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0`、`org.jetbrains.kotlinx:kotlinx-datetime:0.8.0`、`io.insert-koin:koin-bom:4.2.2`、`ai.koog:koog-agents:1.1.1`、`io.ktor:ktor-client-core:3.5.1`、`com.github.luben:zstd-jni:1.5.7-11`、`com.google.zxing:core:3.5.4`、`org.jetbrains.compose.runtime:runtime:1.11.1`、`org.jetbrains.compose.material3:material3:1.11.0-alpha07`、`androidx.work:work-runtime-ktx:2.11.2`、`org.robolectric:robolectric:4.16.1`。全量声明以同提交 `gradle/libs.versions.toml` 为准，不在此将样本伪称完整解析依赖树。
+
+未核实项包括：各 artifact 实际下载内容与 POM/license、传递依赖解析图、native binary 附带授权、GPL 与实际引入依赖的兼容性、NOTICE/版权清单、离线缓存完整性。由于还没有拟复用的确定集合，本次没有作出复用许可批准。
+
+工程选择责任：依据现有规格，Root 可自主提出独立实现的技术方案，且不必为普通实现细节逐项请求许可；但当前证据仍未满足“先验证构建与最小持久化路径”的 #2 门槛，不能据此关闭任务。接受 GPL 衍生分发义务属于会影响未来产品分发的取舍，如要选改造路线，应明确让用户知晓并确认其接受程度。独立实现建议本身不证明已具备可构建工程。
