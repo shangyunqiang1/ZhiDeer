@@ -323,10 +323,8 @@ private fun MonthGrid(
             Row(Modifier.fillMaxWidth()) {
                 for (cell in 0 until 7) {
                     val index = week * 7 + cell
-                    val day = if (index < leadingBlank) null else {
-                        val d = month.atDay(index - leadingBlank + 1)
-                        if (index - leadingBlank <= month.lengthOfMonth()) d else null
-                    }
+                    val dayNum = index - leadingBlank + 1
+                    val day = if (index < leadingBlank || dayNum > month.lengthOfMonth()) null else month.atDay(dayNum)
                     if (day == null) {
                         Box(Modifier.weight(1f).aspectRatio(1f))
                     } else {
