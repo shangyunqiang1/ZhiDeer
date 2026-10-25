@@ -4,6 +4,8 @@ import androidx.room3.Database
 import androidx.room3.RoomDatabase
 
 /**
+ * version 12：合并 T26/#27（memories 长期记忆表——用户显式保存并确认的偏好或事实，
+ * 独立隐私数据表，无回收站列，删除即物理删除）。历史：
  * version 11：合并 T15/#16（occurrence_subtask_records 出现维度子任务步骤记录表，
  * 重复待办每一次出现按父待办子任务模板分别记录步骤勾选，唯一约束
  * (occurrenceId, subTaskId)）。历史：10 合并 T14/#15 单次延期（task_occurrences 主键
@@ -30,8 +32,9 @@ import androidx.room3.RoomDatabase
         TaskOccurrenceEntity::class,
         CalendarReminderEntity::class,
         OccurrenceSubTaskRecordEntity::class,
+        MemoryEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 abstract class ZhiDeerDatabase : RoomDatabase() {
@@ -43,6 +46,7 @@ abstract class ZhiDeerDatabase : RoomDatabase() {
     abstract fun taskOccurrenceDao(): TaskOccurrenceDao
     abstract fun calendarReminderDao(): CalendarReminderDao
     abstract fun occurrenceSubTaskRecordDao(): OccurrenceSubTaskRecordDao
+    abstract fun memoryDao(): MemoryDao
 
     companion object {
         const val NAME = "zhideer.db"
