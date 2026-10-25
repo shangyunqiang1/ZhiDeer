@@ -25,8 +25,9 @@ enum class RecurrenceFrequency(val label: String) {
  * 出现锚点不冗余存储：使用待办 createdAt 在其 [TodoTask.dueZoneId]（创建时锚定时区）下的日期，
  * 由 [RecurrenceAnchors.anchorEpochDay] 派生，天然幂等且编辑规则不改变既有节奏。
  *
- * 每一次出现都是独立的记录维度：完成状态以 (taskId, 出现日 epochDay) 分别保存，
- * 本次未完成不阻止下一次出现；不存在“推进 dueDate 的同一条记录”。
+ * 每一次出现都是独立的记录维度（TaskOccurrence，稳定 id 主键）：完成状态按原始出现日
+ * 分别保存，本次未完成不阻止下一次出现；不存在“推进 dueDate 的同一条记录”。
+ * 单次延期（T14/#15）改写的只是被延期那一行的生效日，规则几何本身不被改写。
  *
  * [exceptions]（T14/#15 纯新增）为例外日（epochDay）集合：被排除的出现日不再出现、
  * 不再要求完成（issue #15 例外日期与单次跳过共用此机制）。例外日只做排除，
