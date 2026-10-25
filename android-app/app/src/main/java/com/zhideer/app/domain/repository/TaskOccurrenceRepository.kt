@@ -4,8 +4,8 @@ import com.zhideer.app.domain.model.TaskOccurrence
 import kotlinx.coroutines.flow.Flow
 
 /**
- * 重复待办出现完成记录的持久化入口（T12/#13）。
- * 写入按 (taskId, occurrenceEpochDay) 主键幂等。
+ * 重复待办出现记录的持久化入口（T12/#13；T14/#15 主键改造）。
+ * 每行按稳定 id 主键幂等写入；同一 (taskId, originalEpochDay) 至多一行。
  * 回收站期间保留全部历史出现记录；仅彻底删除待办时一并清理（T16/#17）。
  */
 interface TaskOccurrenceRepository {

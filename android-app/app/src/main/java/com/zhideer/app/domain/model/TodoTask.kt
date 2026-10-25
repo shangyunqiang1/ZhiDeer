@@ -24,7 +24,7 @@ enum class TaskStatus {
  * 取消（CANCELLED）保留业务记录并停止提醒；普通删除走回收站（[trashedAt]），不永久删除。
  *
  * [recurrenceRule]（T12/#13 纯新增，可空）：重复规则。重复待办按固定日期规则反复出现，
- * 每一次出现的完成状态以 (taskId, 出现日) 维度分别记录（见 [TaskOccurrence]），
+ * 每一次出现的完成状态以出现记录（[TaskOccurrence]，稳定 id 主键）分别记录，
  * 本体 status 不代表某一次出现的完成。
  */
 data class TodoTask(
