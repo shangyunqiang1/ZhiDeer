@@ -16,10 +16,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.zhideer.app.domain.model.TaskPriority
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.zhideer.app.domain.model.TodoTask
 import com.zhideer.app.domain.usecase.TaskInput
 import java.time.Instant
@@ -227,6 +230,7 @@ fun TaskDetailDialog(
     linkUseCases: com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases,
     calendarUseCases: com.zhideer.app.domain.usecase.CalendarUseCases,
     reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
+    recurrenceUseCases: com.zhideer.app.domain.usecase.RecurrenceUseCases,
     onDismiss: () -> Unit,
     onEdit: () -> Unit,
     onPostponeTomorrow: () -> Unit,
@@ -234,11 +238,18 @@ fun TaskDetailDialog(
     onTrash: () -> Unit,
 ) {
     var showLinkDialog by remember { mutableStateOf(false) }
+    var showPostpone by remember { mutableStateOf(false) }
+    var postponeDay by remember { mutableStateOf<Long?>(null) }
+    var detailError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(task.title) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                detailError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
                 Text("优先级：${task.priority.label}")
                 if (task.category.isNotBlank()) Text("分类：${task.category}")
                 if (task.note.isNotBlank()) Text("备注：${task.note}")
@@ -272,6 +283,19 @@ fun TaskDetailDialog(
             Row {
                 TextButton(onClick = onEdit) { Text("编辑") }
                 TextButton(onClick = { showLinkDialog = true }) { Text("关联日程") }
+                if (task.recurrenceRule != null) {
+                    TextButton(onClick = {
+                        scope.launch {
+                            postponeDay = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                com.zhideer.app.domain.model.TaskDue.todayEpochDay(
+                                    task.dueZoneId,
+                                    System.currentTimeMillis(),
+                                )
+                            }
+                            showPostpone = true
+                        }
+                    }) { Text("单次延期") }
+                }
                 TextButton(onClick = onPostponeTomorrow) { Text("延期到明天") }
                 TextButton(onClick = onCancelTask) { Text("取消待办") }
                 TextButton(onClick = onTrash) { Text("删除") }
@@ -281,6 +305,26 @@ fun TaskDetailDialog(
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
+    if (showPostpone) {
+        val rule = task.recurrenceRule
+        val day = postponeDay
+        if (rule != null && day != null) {
+            val anchorDay = Instant.ofEpochMilli(task.createdAt).atZone(zoneId).toLocalDate().toEpochDay()
+            OccurrencePostponeDialog(
+                originalEpochDay = day,
+                rule = rule,
+                anchorEpochDay = anchorDay,
+                onDismiss = { showPostpone = false },
+                onPostpone = { target ->
+                    scope.launch {
+                        recurrenceUseCases.postponeOccurrence(task.id, day, target)
+                            .onSuccess { showPostpone = false; detailError = null }
+                            .onFailure { detailError = it.message }
+                    }
+                },
+            )
+        }
+    }
     if (showLinkDialog) {
         TaskScheduleLinkDialog(
             task = task,
