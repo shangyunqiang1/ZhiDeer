@@ -195,5 +195,17 @@
 - 结果：实际投递 **21:14:13**（目标后 6m13s），`notification_enqueue` 正常记录；投递时刻贴近自动化唤醒屏幕的动作，说明深休/省电下可能要到设备唤醒才补投。
 - 恢复：测试后 `cmd power set-mode 0`（`low_power`=0）。厂商级后台冻结/应用速冻未做脚本化切换（ColorOS 未提供可脚本化开关），只能记录设备处于省电+待机时的可观察结果，不外推到所有厂商限制。
 - 结论：省电/待机显著扩大投递窗口（30s → 2m31s → 6m13s 三档观测），提醒最终仍能到达；因此界面与诊断不得把「已调度」呈现为「已准时投递」。
+### D10 指定日期与无 handler 失败路径（独立环境：Android 模拟器）
+
+- 环境：AOSP 模拟器（Android 15 / API 35，`Android SDK built for x86_64`，AVD `medium_phone`），按 D10 要求用作“无支持 handler 的独立环境”，不替代 OPPO 真机结论。
+- 构造：`adb root` 后 `pm disable-user --user 0 com.android.deskclock`；`cmd package query-activities -a android.intent.action.SET_ALARM` 与 `SHOW_ALARMS` 均返回 `No activities found`。
+- 应用行为（截图 `d10-emu-clock-handoff.png`、`d10-emu-preview.png`）：
+  - 交接页顶部如实显示「当前系统没有可用的时钟应用，请使用回退方案。」，页面不崩溃，仍给出「回退选择：① 手动打开系统时钟自行设置；② 在知时鹿内为事项设置提醒」以及双响提醒。
+  - 预览对话框用红色标出「当前系统没有可用的时钟应用。」并禁用「发起交接」，未产生任何交接记录（列表仍显示「暂无交接记录」），不把跳转失败伪装成待核对/已保存。
+- 指定日历日期（截图 `d10-emu-date-limit.png`、`d10-emu-date-preview.png`）：
+  - 勾选「指定日历日期」后显示中文限制说明：「系统时钟接口只接受小时与分钟，无法传达具体日期。指定日期时不会自动丢弃日期……或改用知时鹿提醒。」
+  - 带日期预览时红色标注「日期无法传达给系统时钟，不能发起。」并禁用「发起交接」，日期字段保持可见、未被静默删除。
+- 与 OPPO 真机 D09 结论合并：真机有 handler 时 ColorOS 只打开闹钟列表、不预填，交接记录保持「待核对」；无 handler 时禁用发起并提供回退。两种路径均不宣称保存成功。
+
 
 
