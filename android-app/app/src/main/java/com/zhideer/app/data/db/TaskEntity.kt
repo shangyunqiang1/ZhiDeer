@@ -30,9 +30,12 @@ data class TaskEntity(
     // 出现锚点不冗余存储，由 createdAt 在 dueZoneId 下派生。
     // T13/#14：MONTHLY 复用 recurrenceIntervalDays 列存「每月第几日」（1-31），
     // 以 recurrenceFrequency 列区分两种语义，避免新增列导致数据库升版。
+    // T14/#15 纯新增：例外日（epochDay）集合，逗号分隔序列化（与 recurrenceWeekdays 同风格）。
+    // 被排除的出现日不再出现/不再要求完成；空串与 null 均视为无例外，旧数据天然兼容。
     val recurrenceFrequency: String? = null,
     val recurrenceIntervalDays: Int? = null,
     val recurrenceWeekdays: String? = null,
+    val recurrenceExceptions: String? = null,
 )
 
 fun TaskEntity.toModel() = TodoTask(
@@ -51,7 +54,7 @@ fun TaskEntity.toModel() = TodoTask(
     completedAt = completedAt,
     postponedAt = postponedAt,
     cancelledAt = cancelledAt,
-    recurrenceRule = recurrenceFrequency?.toRecurrenceRule(recurrenceIntervalDays, recurrenceWeekdays),
+    recurrenceRule = recurrenceFrequency?.toRecurrenceRule(recurrenceIntervalDays, recurrenceWeekdays, recurrenceExceptions),
 )
 
 fun TodoTask.toEntity() = TaskEntity(
@@ -81,22 +84,32 @@ fun TodoTask.toEntity() = TaskEntity(
     recurrenceWeekdays = recurrenceRule
         ?.takeIf { it.frequency == RecurrenceFrequency.WEEKLY }
         ?.weekdays?.sorted()?.joinToString(",") { it.name },
+    recurrenceExceptions = recurrenceRule
+        ?.takeIf { it.exceptions.isNotEmpty() }
+        ?.exceptions?.sorted()?.joinToString(",") { it.toString() },
 )
 
-private fun String.toRecurrenceRule(intervalDays: Int?, weekdaysRaw: String?): RecurrenceRule? = when (this) {
-    RecurrenceFrequency.DAILY.name -> RecurrenceRule(
-        frequency = RecurrenceFrequency.DAILY,
-        intervalDays = intervalDays ?: 1,
-    )
-    RecurrenceFrequency.MONTHLY.name -> RecurrenceRule(
-        frequency = RecurrenceFrequency.MONTHLY,
-        monthDay = intervalDays ?: 1,
-    )
-    RecurrenceFrequency.WEEKLY.name -> RecurrenceRule(
-        frequency = RecurrenceFrequency.WEEKLY,
-        weekdays = weekdaysRaw?.split(",")?.mapNotNull { raw ->
-            DayOfWeek.entries.firstOrNull { it.name == raw }
-        }?.toSet() ?: emptySet(),
-    )
-    else -> null
+private fun String.toRecurrenceRule(intervalDays: Int?, weekdaysRaw: String?, exceptionsRaw: String?): RecurrenceRule? {
+    // T14/#15：例外日在三种频率下都有效；解析失败或空值一律视为无例外
+    val exceptions = exceptionsRaw?.split(",")?.mapNotNull { it.trim().toLongOrNull() }?.toSet() ?: emptySet()
+    return when (this) {
+        RecurrenceFrequency.DAILY.name -> RecurrenceRule(
+            frequency = RecurrenceFrequency.DAILY,
+            intervalDays = intervalDays ?: 1,
+            exceptions = exceptions,
+        )
+        RecurrenceFrequency.MONTHLY.name -> RecurrenceRule(
+            frequency = RecurrenceFrequency.MONTHLY,
+            monthDay = intervalDays ?: 1,
+            exceptions = exceptions,
+        )
+        RecurrenceFrequency.WEEKLY.name -> RecurrenceRule(
+            frequency = RecurrenceFrequency.WEEKLY,
+            weekdays = weekdaysRaw?.split(",")?.mapNotNull { raw ->
+                DayOfWeek.entries.firstOrNull { it.name == raw }
+            }?.toSet() ?: emptySet(),
+            exceptions = exceptions,
+        )
+        else -> null
+    }
 }

@@ -759,6 +759,253 @@ class RecurrenceUseCasesTest {
         assertEquals("每月 31 日", RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 31).summary())
     }
 
+    // ---------- 例外日期与单次跳过（T14/#15）----------
+
+    @Test
+    fun 例外日的出现不再生成且完成被拒绝() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val task = taskUseCases.create(dailyInput()).getOrThrow()
+        val exceptionDay = epochDay("2026-10-27")
+
+        // 通过规则编辑加入例外日（例外随规则持久化）
+        recurrenceUseCases.update(
+            task.id,
+            task.recurrenceRule!!.copy(exceptions = setOf(exceptionDay)),
+        ).getOrThrow()
+
+        // 被排除的出现日不再出现
+        assertEquals(
+            listOf("2026-10-25", "2026-10-26", "2026-10-28").map(::epochDay),
+            recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-10-25"), epochDay("2026-10-28"))
+                .getOrThrow(),
+        )
+        // 例外日当天列表不再出现
+        assertEquals(
+            emptyList<String>(),
+            recurrenceUseCases.observeForDay(exceptionDay).first().map { it.task.title },
+        )
+        // 例外日不再要求完成
+        val completed = recurrenceUseCases.completeOccurrence(task.id, exceptionDay, true)
+        assertTrue(completed.isFailure)
+        assertEquals("该出现日已设为例外，不再要求完成", completed.exceptionOrNull()!!.message)
+    }
+
+    @Test
+    fun 跳过与完成区分_跳过已完成被拒绝_撤销后可跳过() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val task = taskUseCases.create(weeklyInput()).getOrThrow()
+        val monday = epochDay("2026-10-26")
+
+        clock.add(millis("2026-10-26", "09:00"))
+        recurrenceUseCases.completeOccurrence(task.id, monday, true).getOrThrow()
+
+        // 已完成的出现日不能跳过（跳过与完成互斥、区分）
+        val skippedAfterDone = recurrenceUseCases.skipOccurrence(task.id, monday)
+        assertTrue(skippedAfterDone.isFailure)
+        assertEquals("该次出现已完成，请先撤销完成再跳过", skippedAfterDone.exceptionOrNull()!!.message)
+
+        // 撤销完成之后可以跳过；跳过不是完成——不产生已完成记录
+        recurrenceUseCases.completeOccurrence(task.id, monday, false).getOrThrow()
+        recurrenceUseCases.skipOccurrence(task.id, monday).getOrThrow()
+        val records = occurrenceRepository.listByTask(task.id)
+        assertTrue(records.none { it.completed })
+        assertEquals(
+            emptyList<Long>(),
+            recurrenceUseCases.occurrencesForRange(task.id, monday, monday).getOrThrow(),
+        )
+        // 非出现日不能跳过
+        val notScheduled = recurrenceUseCases.skipOccurrence(task.id, epochDay("2026-10-27"))
+        assertTrue(notScheduled.isFailure)
+        assertEquals("该日期不属于重复计划", notScheduled.exceptionOrNull()!!.message)
+    }
+
+    @Test
+    fun 跳过错过的出现后不再逾期且今天照常出现() = runBlocking {
+        clock.add(millis("2026-10-25", "08:00"))
+        val daily = taskUseCases.create(dailyInput()).getOrThrow()
+
+        // 10-25 的出现被错过，10-27 整行按逾期呈现
+        clock.add(millis("2026-10-27", "08:00"))
+        assertEquals(listOf("晨间打卡"), titles(TaskFilter.OVERDUE))
+
+        // 仅本次跳过错过的 10-25 与 10-26：不再要求完成，今天（10-27）的出现照常
+        recurrenceUseCases.skipOccurrence(daily.id, epochDay("2026-10-25")).getOrThrow()
+        recurrenceUseCases.skipOccurrence(daily.id, epochDay("2026-10-26")).getOrThrow()
+        assertEquals(emptyList<String>(), titles(TaskFilter.OVERDUE))
+        assertEquals(listOf("晨间打卡"), titles(TaskFilter.TODAY))
+        // 跳过不产生任何完成记录
+        assertEquals(
+            emptyList<Long>(),
+            occurrenceRepository.listByTask(daily.id).filter { it.completed }.map { it.occurrenceEpochDay },
+        )
+    }
+
+    @Test
+    fun 恢复被跳过的出现后该日重新出现且保持未完成() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val task = taskUseCases.create(weeklyInput()).getOrThrow()
+        val monday = epochDay("2026-10-26")
+
+        recurrenceUseCases.skipOccurrence(task.id, monday).getOrThrow()
+        assertEquals(emptyList<Long>(), recurrenceUseCases.occurrencesForRange(task.id, monday, monday).getOrThrow())
+
+        clock.add(millis("2026-10-26", "08:00"))
+        recurrenceUseCases.restoreOccurrence(task.id, monday).getOrThrow()
+        val onMonday = recurrenceUseCases.observeForDay(monday).first()
+        assertEquals(listOf(task.id), onMonday.map { it.task.id })
+        assertFalse(onMonday.single().completed)
+    }
+
+    @Test
+    fun 重复跳过与恢复幂等不重复产生记录() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val task = taskUseCases.create(dailyInput()).getOrThrow()
+        val day = epochDay("2026-10-26")
+
+        repeat(3) { recurrenceUseCases.skipOccurrence(task.id, day).getOrThrow() }
+        val skipped = taskUseCases.get(task.id)!!.recurrenceRule!!
+        assertEquals(setOf(day), skipped.exceptions)
+
+        // 恢复未跳过的日期同样幂等成功
+        recurrenceUseCases.restoreOccurrence(task.id, epochDay("2026-10-27")).getOrThrow()
+        recurrenceUseCases.restoreOccurrence(task.id, day).getOrThrow()
+        val restored = taskUseCases.get(task.id)!!.recurrenceRule!!
+        assertEquals(emptySet<Long>(), restored.exceptions)
+    }
+
+    @Test
+    fun 规则调整保留既有完成记录且只影响未来出现() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val task = taskUseCases.create(weeklyInput()).getOrThrow()
+        val monday = epochDay("2026-10-26")
+        clock.add(millis("2026-10-26", "09:00"))
+        recurrenceUseCases.completeOccurrence(task.id, monday, true).getOrThrow()
+        val before = occurrenceRepository.listByTask(task.id)
+
+        // 调整规则（每周一三五 → 每周二四）：只影响以后的出现，已完成历史不被删除或改写
+        clock.add(millis("2026-10-27", "09:00"))
+        recurrenceUseCases.update(
+            task.id,
+            RecurrenceRule(RecurrenceFrequency.WEEKLY, weekdays = setOf(DayOfWeek.TUESDAY, DayOfWeek.THURSDAY)),
+        ).getOrThrow()
+
+        assertEquals(before, occurrenceRepository.listByTask(task.id))
+        // 未来出现按新规则生成，旧出现日不再是出现日
+        assertEquals(
+            listOf("2026-10-27", "2026-10-29", "2026-11-03", "2026-11-05").map(::epochDay),
+            recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-10-27"), epochDay("2026-11-06"))
+                .getOrThrow(),
+        )
+        // 已完成的 10-26 记录保留可核对（不再属于新规则的出现序列）
+        val kept = occurrenceRepository.listByTask(task.id).single()
+        assertEquals(monday, kept.occurrenceEpochDay)
+        assertTrue(kept.completed)
+    }
+
+    @Test
+    fun 跨月例外日排除每月出现() = runBlocking {
+        clock.add(millis("2026-01-31"))
+        val task = taskUseCases.create(monthlyInput(title = "月末对账", monthDay = 31)).getOrThrow()
+        val feb28 = epochDay("2026-02-28")
+
+        // 一月的出现已完成后，单次跳过二月的短月出现；三月回到 31 日不受影响
+        clock.add(millis("2026-01-31", "18:00"))
+        recurrenceUseCases.completeOccurrence(task.id, epochDay("2026-01-31"), true).getOrThrow()
+        recurrenceUseCases.skipOccurrence(task.id, feb28).getOrThrow()
+        assertEquals(
+            listOf("2026-01-31", "2026-03-31", "2026-04-30").map(::epochDay),
+            recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-01-01"), epochDay("2026-04-30"))
+                .getOrThrow(),
+        )
+        // 下一次未完成出现跳过例外日
+        clock.add(millis("2026-02-27", "09:00"))
+        val completedDays = occurrenceRepository.listByTask(task.id)
+            .filter { it.completed }.map { it.occurrenceEpochDay }.toSet()
+        assertEquals(
+            epochDay("2026-03-31"),
+            RecurrenceUseCases.nextUnfinishedDay(
+                taskUseCases.get(task.id)!!,
+                completedDays,
+                TaskDue.todayEpochDay(zone.id, clock.last()),
+            ),
+        )
+    }
+
+    @Test
+    fun 例外日关闭重开后保留() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val daily = taskUseCases.create(dailyInput()).getOrThrow()
+        clock.add(millis("2026-10-26", "09:00"))
+        recurrenceUseCases.skipOccurrence(daily.id, epochDay("2026-10-26")).getOrThrow()
+        recurrenceUseCases.completeOccurrence(daily.id, epochDay("2026-10-27"), true).getOrThrow()
+        db.close()
+        open()
+
+        val readBack = taskUseCases.get(daily.id)!!
+        assertEquals(setOf(epochDay("2026-10-26")), readBack.recurrenceRule!!.exceptions)
+        assertEquals(
+            emptyList<Long>(),
+            recurrenceUseCases.occurrencesForRange(daily.id, epochDay("2026-10-26"), epochDay("2026-10-26"))
+                .getOrThrow(),
+        )
+        // 完成记录与例外各自保留
+        val records = occurrenceRepository.listByTask(daily.id)
+        assertEquals(listOf(epochDay("2026-10-27")), records.filter { it.completed }.map { it.occurrenceEpochDay })
+        // 通过规则编辑写入的例外同样持久化
+        recurrenceUseCases.update(
+            daily.id,
+            readBack.recurrenceRule.copy(exceptions = setOf(epochDay("2026-10-26"), epochDay("2026-10-28"))),
+        ).getOrThrow()
+        db.close()
+        open()
+        assertEquals(
+            setOf(epochDay("2026-10-26"), epochDay("2026-10-28")),
+            taskUseCases.get(daily.id)!!.recurrenceRule!!.exceptions,
+        )
+        assertEquals(
+            // 例外日 10-26、10-28 被排除；10-27 已完成但仍是出现日，10-29 照常
+            listOf(epochDay("2026-10-27"), epochDay("2026-10-29")),
+            recurrenceUseCases.occurrencesForRange(daily.id, epochDay("2026-10-26"), epochDay("2026-10-29"))
+                .getOrThrow(),
+        )
+    }
+
+    @Test
+    fun 规则摘要显示例外数() {
+        assertEquals("每天", RecurrenceRule(RecurrenceFrequency.DAILY).summary())
+        assertEquals(
+            "每天，已排除 2 天",
+            RecurrenceRule(RecurrenceFrequency.DAILY, exceptions = setOf(1L, 5L)).summary(),
+        )
+        assertEquals(
+            "每周 一，已排除 1 天",
+            RecurrenceRule(RecurrenceFrequency.WEEKLY, weekdays = setOf(DayOfWeek.MONDAY), exceptions = setOf(9L)).summary(),
+        )
+    }
+
+    @Test
+    fun 例外与跳过拒绝非法输入提示中文() = runBlocking {
+        clock.add(millis("2026-10-25"))
+        val recurring = taskUseCases.create(dailyInput()).getOrThrow()
+        val plain = taskUseCases.create(TaskInput(title = "普通待办", dueZoneId = zone.id)).getOrThrow()
+
+        val missing = recurrenceUseCases.skipOccurrence("task-404", epochDay("2026-10-26"))
+        assertTrue(missing.isFailure)
+        assertEquals("待办不存在或已永久删除", missing.exceptionOrNull()!!.message)
+
+        val notRecurring = recurrenceUseCases.skipOccurrence(plain.id, epochDay("2026-10-26"))
+        assertTrue(notRecurring.isFailure)
+        assertEquals("该待办不是重复待办", notRecurring.exceptionOrNull()!!.message)
+
+        // 锚点之前不出现，也不能跳过
+        val beforeAnchor = recurrenceUseCases.skipOccurrence(recurring.id, epochDay("2026-10-24"))
+        assertTrue(beforeAnchor.isFailure)
+        assertEquals("该日期不属于重复计划", beforeAnchor.exceptionOrNull()!!.message)
+
+        // 恢复不存在的例外：幂等成功
+        assertTrue(recurrenceUseCases.restoreOccurrence(recurring.id, epochDay("2026-10-26")).isSuccess)
+    }
+
     private suspend fun titles(filter: TaskFilter): List<String> =
         taskUseCases.observe(filter).first().map { it.title }
 }

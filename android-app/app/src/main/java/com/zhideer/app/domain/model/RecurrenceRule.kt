@@ -27,16 +27,21 @@ enum class RecurrenceFrequency(val label: String) {
  *
  * 每一次出现都是独立的记录维度：完成状态以 (taskId, 出现日 epochDay) 分别保存，
  * 本次未完成不阻止下一次出现；不存在“推进 dueDate 的同一条记录”。
+ *
+ * [exceptions]（T14/#15 纯新增）为例外日（epochDay）集合：被排除的出现日不再出现、
+ * 不再要求完成（issue #15 例外日期与单次跳过共用此机制）。例外日只做排除，
+ * 不改写规则几何，也不影响既有完成记录；旧数据默认空集合，天然兼容。
  */
 data class RecurrenceRule(
     val frequency: RecurrenceFrequency,
     val intervalDays: Int = 1,
     val weekdays: Set<DayOfWeek> = emptySet(),
     val monthDay: Int = 1,
+    val exceptions: Set<Long> = emptySet(),
 ) {
 
-    /** day 是否为该规则的一次出现（锚点为出现序列的下限）。 */
-    fun occursOn(anchorEpochDay: Long, day: Long): Boolean {
+    /** day 是否为该规则按锚点与频率几何的一次出现（不含例外日排除，供跳过/例外校验）。 */
+    fun occursByPatternOn(anchorEpochDay: Long, day: Long): Boolean {
         if (day < anchorEpochDay) return false
         return when (frequency) {
             RecurrenceFrequency.DAILY -> (day - anchorEpochDay) % intervalDays == 0L
@@ -48,15 +53,29 @@ data class RecurrenceRule(
         }
     }
 
-    /** 从 day 起（含当天）下一次出现；规则有效则 DAILY/WEEKLY/MONTHLY 必有解。 */
-    fun nextOnOrAfter(anchorEpochDay: Long, day: Long): Long = when (frequency) {
+    /** day 是否为该规则的一次出现（锚点为出现序列的下限，例外日被排除）。 */
+    fun occursOn(anchorEpochDay: Long, day: Long): Boolean =
+        occursByPatternOn(anchorEpochDay, day) && day !in exceptions
+
+    /** 从 day 起（含当天）下一次出现；规则有效则 DAILY/WEEKLY/MONTHLY 必有解，例外日被跳过。 */
+    fun nextOnOrAfter(anchorEpochDay: Long, day: Long): Long {
+        var candidate = nextPatternDayOnOrAfter(anchorEpochDay, day)
+        // 例外日逐个向后跳：例外集合有限且候选严格递增，必终止
+        while (candidate in exceptions) {
+            candidate = nextPatternDayOnOrAfter(anchorEpochDay, candidate + 1)
+        }
+        return candidate
+    }
+
+    /** 按锚点与频率几何（不含例外日）从 day 起（含当天）下一次出现。 */
+    private fun nextPatternDayOnOrAfter(anchorEpochDay: Long, day: Long): Long = when (frequency) {
         RecurrenceFrequency.DAILY ->
             if (day <= anchorEpochDay) anchorEpochDay
             else anchorEpochDay + ((day - anchorEpochDay + intervalDays - 1) / intervalDays) * intervalDays
         RecurrenceFrequency.WEEKLY -> {
             var candidate = maxOf(day, anchorEpochDay)
-            // 最多看 7 天必命中一个星期几
-            while (!occursOn(anchorEpochDay, candidate)) candidate++
+            // 最多看 7 天必命中一个星期几（几何不含例外，不会因例外死循环）
+            while (!occursByPatternOn(anchorEpochDay, candidate)) candidate++
             candidate
         }
         RecurrenceFrequency.MONTHLY -> {
@@ -93,15 +112,19 @@ data class RecurrenceRule(
         return result
     }
 
-    /** 中文规则摘要：如「每天」「每 3 天」「每周 一、三、五」「每月 15 日」。 */
-    fun summary(): String = when (frequency) {
-        RecurrenceFrequency.DAILY ->
-            if (intervalDays == 1) "每天" else "每 $intervalDays 天"
-        RecurrenceFrequency.WEEKLY -> {
-            val names = weekdays.sorted().joinToString("、") { weekdayName(it) }
-            "每周 $names"
+    /** 中文规则摘要：如「每天」「每 3 天」「每周 一、三、五」「每月 15 日」；有例外日时追加例外数。 */
+    fun summary(): String {
+        val base = when (frequency) {
+            RecurrenceFrequency.DAILY ->
+                if (intervalDays == 1) "每天" else "每 $intervalDays 天"
+            RecurrenceFrequency.WEEKLY -> {
+                val names = weekdays.sorted().joinToString("、") { weekdayName(it) }
+                "每周 $names"
+            }
+            RecurrenceFrequency.MONTHLY -> "每月 $monthDay 日"
         }
-        RecurrenceFrequency.MONTHLY -> "每月 $monthDay 日"
+        // T14/#15：摘要显示例外数，让例外日期在任何列表位置都可见
+        return if (exceptions.isEmpty()) base else "$base，已排除 ${exceptions.size} 天"
     }
 
     companion object {
