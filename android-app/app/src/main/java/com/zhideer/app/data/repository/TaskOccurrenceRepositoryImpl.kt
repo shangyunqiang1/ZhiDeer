@@ -29,4 +29,9 @@ class TaskOccurrenceRepositoryImpl(
     override suspend fun upsert(occurrence: TaskOccurrence) = withContext(ioDispatcher) {
         dao.upsert(occurrence.toEntity())
     }
+
+    /** 彻底删除待办联动（T16/#17）：物理删除其全部出现完成记录。 */
+    override suspend fun purgeByTask(taskId: String) = withContext(ioDispatcher) {
+        dao.deleteByTask(taskId)
+    }
 }

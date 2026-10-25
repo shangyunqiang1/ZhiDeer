@@ -32,4 +32,17 @@ class TasksRepositoryImpl(
     override suspend fun trashTask(id: String, trashedAtMillis: Long) = withContext(ioDispatcher) {
         taskDao.trash(id, trashedAtMillis)
     }
+
+    override fun observeTrashedTasks(): Flow<List<TodoTask>> =
+        taskDao.observeTrashed()
+            .map { list -> list.map { it.toModel() } }
+            .flowOn(ioDispatcher)
+
+    override suspend fun listTrashedTasks(): List<TodoTask> = withContext(ioDispatcher) {
+        taskDao.listTrashed().map { it.toModel() }
+    }
+
+    override suspend fun purgeTask(id: String) = withContext(ioDispatcher) {
+        taskDao.deleteById(id)
+    }
 }
