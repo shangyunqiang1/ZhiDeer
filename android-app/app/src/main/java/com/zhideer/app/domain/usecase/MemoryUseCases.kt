@@ -1,6 +1,7 @@
 package com.zhideer.app.domain.usecase
 
 import com.zhideer.app.domain.model.Memory
+import com.zhideer.app.domain.model.MemoryRefType
 import com.zhideer.app.domain.model.MemorySource
 import com.zhideer.app.domain.model.MemoryType
 import com.zhideer.app.domain.repository.MemoriesRepository
@@ -25,7 +26,12 @@ data class MemoryInput(
  * - 停用是可逆的软禁用，停用或过期内容不进入可用记忆集合；
  * - 删除是彻底删除（物理删除）：记忆是独立于便签与待办的隐私数据，不进入回收站、
  *   不适用普通事项三十天保留规则（#17：记忆与隐私数据不误套普通事项三十天保留
- *   规则）；用户想暂时不用某条记忆时用停用（可恢复），确定不要才删除（不可恢复）。
+ *   规则）；用户想暂时不用某条记忆时用停用（可恢复），确定不要才删除（不可恢复）；
+ *   删除记忆不触碰来源原文，来源清除必须另行明确选择（#28）。
+ * - 来源删除边界（#28，GLOSSARY：长期记忆具有可追溯的来源）：记忆可携带指向普通
+ *   事项的来源引用（sourceRef）；来源进入回收站立即停用关联记忆并标记来源缺失，
+ *   来源恢复不自动启用，来源彻底删除（purge/三十天到期清理）级联清理关联记忆。
+ *   联动钩子由 AppContainer 接线，见 markSourceMissing/clearSourceMissing/purgeBySource。
  */
 class MemoryUseCases(
     private val repository: MemoriesRepository,
@@ -129,6 +135,32 @@ class MemoryUseCases(
         input.content.isBlank() -> "记忆内容不能为空"
         else -> null
     }
+
+    // ---------- 来源删除边界联动（T27/#28） ----------
+    //
+    // 来源记录（待办/日程/便签）删除、恢复与彻底删除时的关联记忆联动：
+    // - 来源进入回收站 → markSourceMissing：立即停用关联记忆并标记来源缺失（issue #28）；
+    //   记忆保留（管理视角仍可定位），不级联删除——来源只是暂时离开正常查询；
+    // - 来源从回收站恢复 → clearSourceMissing：清除来源缺失标记，但【不自动启用】记忆
+    //   （issue #28：恢复来源不自动启用记忆），重新启用由用户显式完成；
+    // - 来源彻底删除（purge 或三十天到期清理）→ purgeBySource：物理删除关联记忆并清理
+    //   检索入口（issue #28：清理关联记忆和检索索引），避免从原文再次注入相同偏好；
+    // - 各操作幂等：重复标记/清除/清理返回 0，无副作用；记忆自身不进回收站，
+    //   不套三十天规则——三十天清理只清来源原文并级联清理关联记忆。
+    // 调用点由 AppContainer 以 onTrashed/onSourceRestored/onSourcePurged 钩子接线，
+    // 用例层不反向依赖普通事项用例（与 SubTaskUseCases::trashForParent 模式一致）。
+
+    /** 来源记录进入回收站：立即停用其关联记忆并标记来源缺失，返回受影响条数（幂等）。 */
+    suspend fun markSourceMissing(sourceType: MemoryRefType, sourceId: String): Int =
+        repository.disableAndMarkSourceMissing(sourceType, sourceId, now())
+
+    /** 来源记录从回收站恢复：清除来源缺失标记；不自动启用记忆，返回受影响条数（幂等）。 */
+    suspend fun clearSourceMissing(sourceType: MemoryRefType, sourceId: String): Int =
+        repository.clearSourceMissing(sourceType, sourceId, now())
+
+    /** 来源记录被彻底删除：物理删除其关联记忆（清理检索入口），返回清理条数。 */
+    suspend fun purgeBySource(sourceType: MemoryRefType, sourceId: String): Int =
+        repository.deleteBySourceRef(sourceType, sourceId)
 }
 
 /** 记忆在 [atMillis] 时刻是否属于可用记忆集合：已确认、未停用且未过有效期。 */

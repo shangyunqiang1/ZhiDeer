@@ -4,6 +4,7 @@ import com.zhideer.app.data.db.MemoryDao
 import com.zhideer.app.data.db.toEntity
 import com.zhideer.app.data.db.toModel
 import com.zhideer.app.domain.model.Memory
+import com.zhideer.app.domain.model.MemoryRefType
 import com.zhideer.app.domain.repository.MemoriesRepository
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
@@ -33,4 +34,25 @@ class MemoriesRepositoryImpl(
     override suspend fun deleteMemory(id: String) = withContext(ioDispatcher) {
         memoryDao.deleteById(id)
     }
+
+    override suspend fun disableAndMarkSourceMissing(
+        sourceType: MemoryRefType,
+        sourceId: String,
+        updatedAt: Long,
+    ): Int = withContext(ioDispatcher) {
+        memoryDao.disableAndMarkSourceMissing(sourceType.name, sourceId, updatedAt)
+    }
+
+    override suspend fun clearSourceMissing(
+        sourceType: MemoryRefType,
+        sourceId: String,
+        updatedAt: Long,
+    ): Int = withContext(ioDispatcher) {
+        memoryDao.clearSourceMissing(sourceType.name, sourceId, updatedAt)
+    }
+
+    override suspend fun deleteBySourceRef(sourceType: MemoryRefType, sourceId: String): Int =
+        withContext(ioDispatcher) {
+            memoryDao.deleteBySourceRef(sourceType.name, sourceId)
+        }
 }

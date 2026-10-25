@@ -32,6 +32,10 @@ class NoteUseCases(
     private val repository: NotesRepository,
     private val idGen: () -> String,
     private val now: () -> Long,
+    // T27/#28 纯新增：便签进入回收站成功后的来源联动钩子，默认无操作；
+    // AppContainer 组装后注册为 MemoryUseCases::markSourceMissing（NOTE），
+    // 立即停用引用该便签的记忆并标记来源缺失。现有语义与既有调用不受影响。
+    private val onTrashed: suspend (noteId: String) -> Unit = {},
 ) {
 
     suspend fun create(input: NoteInput): Result<Note> {
@@ -92,11 +96,12 @@ class NoteUseCases(
         return Result.success(updated)
     }
 
-    /** 普通删除：标记回收站并从正常查询与搜索排除，不永久删除。 */
+    /** 普通删除：标记回收站并从正常查询与搜索排除，不永久删除；来源联动经 onTrashed（#28）。 */
     suspend fun trash(id: String): Result<Unit> {
         repository.getNote(id)
             ?: return Result.failure(IllegalStateException("便签不存在或已永久删除"))
         repository.trashNote(id, now())
+        onTrashed(id)
         return Result.success(Unit)
     }
 
