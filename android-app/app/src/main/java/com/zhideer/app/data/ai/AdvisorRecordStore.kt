@@ -93,6 +93,16 @@ class AdvisorRecordStore(
         }
     }
 
+    /**
+     * 整份替换记录（T33/#34 备份恢复）：以备份中的反馈、采纳执行记录与依据绑定覆盖当前记录。
+     * 只写记录存储：绝不执行提案、绝不给 AI 授权、不写长期记忆。
+     */
+    suspend fun replaceAll(records: AdvisorRecords) {
+        dataStore.edit { prefs ->
+            prefs[KEY_RECORDS] = json.encodeToString(records)
+        }
+    }
+
     fun close() {
         scope.cancel()
     }

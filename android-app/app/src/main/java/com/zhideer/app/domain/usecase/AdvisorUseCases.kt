@@ -8,6 +8,7 @@ import com.zhideer.app.domain.model.AdvisorEvidenceSnapshot
 import com.zhideer.app.domain.model.AdvisorFeedbackRecord
 import com.zhideer.app.domain.model.AdvisorFeedbackType
 import com.zhideer.app.domain.model.AdvisorProposalBinding
+import com.zhideer.app.domain.model.AdvisorRecords
 import com.zhideer.app.domain.model.AiProposal
 import com.zhideer.app.domain.model.AiProposalChanges
 import com.zhideer.app.domain.model.AiProposalItem
@@ -446,6 +447,25 @@ class AdvisorUseCases(
                 IllegalStateException("该提案已执行完成，无法取消；如需撤销请到待办页面手动调整"),
             )
         }
+    }
+
+    // ---------- T33/#34 备份恢复 ----------
+
+    /**
+     * 备份恢复后的参谋记录还原（T33/#34）：
+     * - 备份中的反馈、采纳执行记录与提案依据绑定原样保存，保留建议使用与执行的追溯能力；
+     * - 恢复前仍待确认的参谋提案一并失效（业务数据已被整库替换，旧依据不可直接执行，
+     *   必须重新生成建议并确认）；已执行、结果未知或已失效的提案不改写；
+     * - 不授予任何 AI 上下文授权、不写长期记忆。
+     */
+    suspend fun restoreAdvisorRecords(records: AdvisorRecords) {
+        // 恢复前仍待确认的参谋提案（sessionId = null）一律失效：业务数据已被整库替换，
+        // 旧依据不可直接执行，避免恢复后直接沿用旧方案；已执行/未知/已失效状态不改写。
+        val staleReason = "数据已从备份恢复：旧建议需重新生成并确认，未执行任何写入"
+        proposalStore.load()
+            .filter { it.sessionId == null && it.status == AiProposalStatus.PENDING }
+            .forEach { expireProposal(it.id, staleReason) }
+        recordStore.replaceAll(records)
     }
 
     /** 全部反馈（按保存顺序，供追溯）。 */

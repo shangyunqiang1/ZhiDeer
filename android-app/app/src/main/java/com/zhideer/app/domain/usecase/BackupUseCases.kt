@@ -8,6 +8,7 @@ import androidx.sqlite.SQLITE_DATA_INTEGER
 import androidx.sqlite.SQLITE_DATA_TEXT
 import androidx.sqlite.SQLiteStatement
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.domain.model.AdvisorRecords
 import com.zhideer.app.domain.model.AiChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -50,6 +52,12 @@ data class BackupSummary(
     val exportedAt: Long,
     val tableCounts: Map<String, Int>,
     val aiSessionCount: Int,
+    /** 参谋建议反馈条数（T33/#34）。 */
+    val advisorFeedbackCount: Int,
+    /** 参谋建议采纳执行记录条数（T33/#34）。 */
+    val advisorAdoptionCount: Int,
+    /** 参谋建议与操作提案依据绑定条数（T33/#34）。 */
+    val advisorBindingCount: Int,
 )
 
 /** 校验结果：清单计数与实际解密行数的核对（[integrityOk] = 两者一致）。 */
@@ -61,6 +69,12 @@ data class BackupVerification(
     val actualTableCounts: Map<String, Int>,
     val aiSessionCount: Int,
     val actualAiSessionCount: Int,
+    val advisorFeedbackCount: Int,
+    val advisorAdoptionCount: Int,
+    val advisorBindingCount: Int,
+    val actualAdvisorFeedbackCount: Int,
+    val actualAdvisorAdoptionCount: Int,
+    val actualAdvisorBindingCount: Int,
     val integrityOk: Boolean,
 )
 
@@ -76,6 +90,9 @@ data class BackupInspection(
     val exportedAt: Long,
     val tableCounts: Map<String, Int>,
     val aiSessionCount: Int,
+    val advisorFeedbackCount: Int,
+    val advisorAdoptionCount: Int,
+    val advisorBindingCount: Int,
     val integrityOk: Boolean,
     val compatible: Boolean,
     val incompatibilityReason: String?,
@@ -97,6 +114,12 @@ data class RestoreSummary(
     val pausedCalendarReminderCount: Int,
     val pausedReminderSources: List<String>,
     val pausedCalendarReminderSources: List<String>,
+    /** 还原的参谋建议反馈条数（T33/#34）。 */
+    val advisorFeedbackCount: Int,
+    /** 还原的参谋建议采纳执行记录条数（T33/#34）。 */
+    val advisorAdoptionCount: Int,
+    /** 还原的参谋建议依据绑定条数（T33/#34）。 */
+    val advisorBindingCount: Int,
 )
 
 /** 备份明文负载：全部用户数据表 JSON 行 + 会话历史 + 版本与计数清单。 */
@@ -109,17 +132,31 @@ internal data class BackupPayload(
     val tables: Map<String, JsonArray>,
     val aiSessionCount: Int,
     val aiSessions: List<AiChatSession> = emptyList(),
+    /** 参谋记录计数清单（T33/#34）：用于解密后与恢复前核对完整性。 */
+    val advisorFeedbackCount: Int = 0,
+    val advisorAdoptionCount: Int = 0,
+    val advisorBindingCount: Int = 0,
+    /**
+     * 参谋建议的反馈、采纳执行记录与提案依据绑定（T33/#34）。
+     * 建议本身按真实记录实时生成、不持久化；备份保存的是建议的使用与执行痕迹，
+     * 恢复后仍可按依据记录核对（依据不可核验时不当作确定事实）。
+     */
+    val advisorRecords: AdvisorRecords = AdvisorRecords(),
 )
 
 /**
  * 手动加密备份导出（T31/#32）统一入口。
  *
- * 备份范围（issue #32：日历、待办、便签、会话及相应本地关系）：
- * - Room v12 全部用户数据表（[BACKUP_TABLES]，含回收站与已停用记录——备份是全量数据）；
+ * 备份范围（issue #32 基础范围；T33/#34 扩展记忆来源与参谋记录）：
+ * - Room v14 全部用户数据表（[BACKUP_TABLES]，含回收站、已停用记录与 clock_handoffs
+ *   系统时钟交接记录——备份是全量数据，恢复后不丢失业务可追溯性）；
  * - AI 会话历史（DataStore JSON，经 [sessionHistory] 读取）；
+ * - 参谋建议的反馈、采纳执行记录与提案依据绑定（DataStore JSON，经 [advisorHistory]
+ *   读取；建议本身按真实记录实时生成、不持久化，备份保存的是使用与执行痕迹）；
  * - 绝不包含：API Key 与本机配置（EncryptedSharedPreferences/SharedPreferences，
  *   备份路径从不读取任何配置存储——安全边界，测试断言保障）；
- * - 操作提案草稿（AiProposalStore）为临时草稿，不属于用户事项数据，本任务不纳入。
+ * - 操作提案草稿（AiProposalStore）为临时草稿，不属于用户事项数据，不纳入备份；
+ *   恢复时旧参谋提案一律失效，须重新生成建议并确认（见 [restoreAll]）。
  *
  * 加密方案（仅 javax.crypto 标准库，无第三方依赖）：
  * - 密钥派生：PBKDF2WithHmacSHA256，随机 16 字节盐，600,000 次迭代，256 位密钥；
@@ -145,7 +182,14 @@ internal data class BackupPayload(
  *   任一步失败（含恢复后自校验计数不符）整体回滚，当前有效数据原样保留；
  * - 提醒先暂停：恢复的待办/日程提醒行一律以停用状态落库，不自动重建任何未来提醒；
  *   摘要中给出暂停清单，经用户逐项确认与既有权限检查（未就绪/精确闹钟能力）后才重新调度；
+ * - 记忆来源安全（T33/#34）：来源缺失（不可核验依据）的记忆恢复时强制停用，不把无法
+ *   核对的偏好恢复成可用事实；停用/已删除关联状态与原文、来源 id 原样保留；
  * - 会话历史在 Room 事务成功后还原（[sessionRestorer]），失败如实报告；
+ * - 参谋记录在 Room 事务成功后还原（[advisorRestorer]）：反馈、采纳执行记录与依据绑定
+ *   原样保存以保留追溯性，同时让恢复前待确认的旧建议提案失效（依据可能已变化，
+ *   须重新生成并确认）；还原失败如实报告；
+ * - AI 上下文授权重置（[aiAuthorizationResetter]）：数据替换后先前授权不再沿用，
+ *   恢复数据不等于恢复外发权限，用户必须重新确认；
  * - 绝不触碰 API Key 与本机配置（恢复路径不读写任何配置存储，测试断言保障）；
  * - 所有失败以中文 [BackupException] 返回，口令不出现在任何提示中。
  */
@@ -156,6 +200,12 @@ class BackupUseCases(
     private val now: () -> Long = System::currentTimeMillis,
     /** 会话历史还原出口（T32/#33）：Room 事务成功后以备份中的会话列表调用。 */
     private val sessionRestorer: suspend (List<AiChatSession>) -> Unit = {},
+    /** 参谋记录读取出口（T33/#34）：反馈、采纳执行记录与提案依据绑定存 DataStore JSON。 */
+    private val advisorHistory: suspend () -> AdvisorRecords = { AdvisorRecords() },
+    /** 参谋记录还原出口（T33/#34）：保存备份中的记录，并让恢复前待确认的旧建议提案失效。 */
+    private val advisorRestorer: suspend (AdvisorRecords) -> Unit = {},
+    /** AI 上下文授权重置出口（T33/#34）：恢复成功后必须重新授权，绝不因恢复自动授予。 */
+    private val aiAuthorizationResetter: () -> Unit = {},
 ) {
 
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
@@ -260,8 +310,12 @@ class BackupUseCases(
             exportedAt = payload.exportedAt,
             tableCounts = payload.tableCounts,
             aiSessionCount = payload.aiSessionCount,
+            advisorFeedbackCount = payload.advisorFeedbackCount,
+            advisorAdoptionCount = payload.advisorAdoptionCount,
+            advisorBindingCount = payload.advisorBindingCount,
             integrityOk = actualCounts == payload.tableCounts &&
-                payload.aiSessions.size == payload.aiSessionCount,
+                payload.aiSessions.size == payload.aiSessionCount &&
+                advisorCountsMatch(payload),
             compatible = compatible,
             incompatibilityReason = if (compatible) {
                 null
@@ -290,7 +344,10 @@ class BackupUseCases(
             )
         }
         val actualCounts = payload.tables.mapValues { it.value.size }
-        if (actualCounts != payload.tableCounts || payload.aiSessions.size != payload.aiSessionCount) {
+        if (actualCounts != payload.tableCounts ||
+            payload.aiSessions.size != payload.aiSessionCount ||
+            !advisorCountsMatch(payload)
+        ) {
             throw BackupException("备份内容已损坏（计数清单与实际内容不一致），已取消恢复；当前数据未改动")
         }
         if (payload.tables.keys != BACKUP_TABLES.toSet()) {
@@ -304,7 +361,21 @@ class BackupUseCases(
             verifyRestoredCounts(this, payload.tableCounts)
             queryPausedReminders(this)
         }
-        // 3. 会话历史还原：Room 事务成功后执行；失败如实报告（事项数据已恢复）
+        // 3. AI 上下文授权重置（T33/#34）：业务数据已被整库替换，恢复数据不等于恢复外发权限，
+        //    先前获得的授权不再沿用，必须重新确认；与恢复是否全部成功无关（不静默保留外发权限）
+        aiAuthorizationResetter()
+        // 4. 参谋记录还原（先于会话）：反馈、采纳执行记录与依据绑定原样保存（保留可追溯性），
+        //    并让恢复前待确认的旧建议提案失效（依据可能已随整库替换变化，须重新生成确认）；
+        //    即使后续会话还原失败，旧建议也已不可直接执行（安全优先）。
+        //    失败如实报告（事项数据已恢复），绝不虚报成功
+        try {
+            advisorRestorer(payload.advisorRecords)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw BackupException("事项数据已恢复，但参谋建议记录还原失败：${e.message ?: e.javaClass.simpleName}", e)
+        }
+        // 5. 会话历史还原：失败如实报告（事项数据与参谋记录已恢复）
         try {
             sessionRestorer(payload.aiSessions)
         } catch (e: CancellationException) {
@@ -322,6 +393,9 @@ class BackupUseCases(
             pausedCalendarReminderCount = paused.second,
             pausedReminderSources = paused.third.first,
             pausedCalendarReminderSources = paused.third.second,
+            advisorFeedbackCount = payload.advisorFeedbackCount,
+            advisorAdoptionCount = payload.advisorAdoptionCount,
+            advisorBindingCount = payload.advisorBindingCount,
         )
     }
 
@@ -344,7 +418,10 @@ class BackupUseCases(
     private suspend fun insertRow(scope: PooledConnection, table: String, row: JsonObject) {
         val columns = row.keys.toList()
         if (columns.isEmpty()) return
+        // 恢复的待办/日程提醒一律先暂停；来源缺失（不可核验依据）的记忆强制停用，
+        // 不得把无法核对的偏好恢复成可用的确定事实（T33/#34）
         val pauseEnabled = table == "reminders" || table == "calendar_reminders"
+        val disableMissingSourceMemory = table == "memories" && isTruthyFlag(row["sourceRefMissing"])
         val sql = buildString {
             append("INSERT INTO ").append(table).append(" (")
             columns.joinTo(this, ", ")
@@ -357,7 +434,7 @@ class BackupUseCases(
                 when (val value = row[name] ?: JsonNull) {
                     is JsonNull -> statement.bindNull(index + 1)
                     // 恢复的提醒先暂停：enabled 强制 0，经用户确认后才重新启用调度
-                    is JsonPrimitive -> if (pauseEnabled && name == "enabled") {
+                    is JsonPrimitive -> if ((pauseEnabled || disableMissingSourceMemory) && name == "enabled") {
                         statement.bindLong(index + 1, 0L)
                     } else {
                         bindPrimitive(statement, index + 1, value)
@@ -368,6 +445,16 @@ class BackupUseCases(
             statement.step()
         }
     }
+
+    /** 备份行中的布尔/整数标记：导出为 0/1 整数，兼容 true/false 字符串。 */
+    private fun isTruthyFlag(value: JsonElement?): Boolean =
+        value is JsonPrimitive && (value.content == "1" || value.content == "true")
+
+    /** 参谋记录计数完整性（T33/#34）：备份清单计数必须与记录集合实际条数一致。 */
+    private fun advisorCountsMatch(payload: BackupPayload): Boolean =
+        payload.advisorFeedbackCount == payload.advisorRecords.feedback.size &&
+            payload.advisorAdoptionCount == payload.advisorRecords.adoptions.size &&
+            payload.advisorBindingCount == payload.advisorRecords.bindings.size
 
     private fun bindPrimitive(statement: SQLiteStatement, index: Int, value: JsonPrimitive) {
         when {
@@ -416,7 +503,7 @@ class BackupUseCases(
         val exportedAt = now()
         // 1. 读取全部用户数据表（原样行数据，含回收站记录）
         val tables = readAllTables()
-        // 2. 读取会话历史：失败即整体失败，绝不生成缺会话的“成功”备份
+        // 2. 读取会话历史与参谋记录：失败即整体失败，绝不生成缺内容的“成功”备份
         val sessions = try {
             sessionHistory()
         } catch (e: CancellationException) {
@@ -424,7 +511,14 @@ class BackupUseCases(
         } catch (e: Exception) {
             throw BackupException("读取会话历史失败，备份未生成：${e.message ?: e.javaClass.simpleName}", e)
         }
-        // 3. 组装负载并加密
+        val advisor = try {
+            advisorHistory()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw BackupException("读取参谋建议记录失败，备份未生成：${e.message ?: e.javaClass.simpleName}", e)
+        }
+        // 3. 组装负载并加密（参谋记录属于建议使用与执行的痕迹，随备份完整保留）
         val payload = BackupPayload(
             formatVersion = FORMAT_VERSION,
             dbVersion = readDbVersion(),
@@ -433,6 +527,10 @@ class BackupUseCases(
             tables = tables,
             aiSessionCount = sessions.size,
             aiSessions = sessions,
+            advisorFeedbackCount = advisor.feedback.size,
+            advisorAdoptionCount = advisor.adoptions.size,
+            advisorBindingCount = advisor.bindings.size,
+            advisorRecords = advisor,
         )
         val plainBytes = json.encodeToString(BackupPayload.serializer(), payload)
             .toByteArray(StandardCharsets.UTF_8)
@@ -453,6 +551,9 @@ class BackupUseCases(
             exportedAt = check.exportedAt,
             tableCounts = check.tableCounts,
             aiSessionCount = check.aiSessionCount,
+            advisorFeedbackCount = check.advisorFeedbackCount,
+            advisorAdoptionCount = check.advisorAdoptionCount,
+            advisorBindingCount = check.advisorBindingCount,
         )
     }
 
@@ -512,7 +613,8 @@ class BackupUseCases(
         }
         val actualCounts = payload.tables.mapValues { it.value.size }
         val integrityOk = actualCounts == payload.tableCounts &&
-            payload.aiSessions.size == payload.aiSessionCount
+            payload.aiSessions.size == payload.aiSessionCount &&
+            advisorCountsMatch(payload)
         return BackupVerification(
             formatVersion = payload.formatVersion,
             dbVersion = payload.dbVersion,
@@ -521,6 +623,12 @@ class BackupUseCases(
             actualTableCounts = actualCounts,
             aiSessionCount = payload.aiSessionCount,
             actualAiSessionCount = payload.aiSessions.size,
+            advisorFeedbackCount = payload.advisorFeedbackCount,
+            advisorAdoptionCount = payload.advisorAdoptionCount,
+            advisorBindingCount = payload.advisorBindingCount,
+            actualAdvisorFeedbackCount = payload.advisorRecords.feedback.size,
+            actualAdvisorAdoptionCount = payload.advisorRecords.adoptions.size,
+            actualAdvisorBindingCount = payload.advisorRecords.bindings.size,
             integrityOk = integrityOk,
         )
     }
@@ -633,7 +741,11 @@ class BackupUseCases(
         /** 备份文件格式版本（写入文件头，版本化）。 */
         const val FORMAT_VERSION = 1
 
-        /** 备份覆盖的全部用户数据表（Room v12，ZhiDeerDatabase 实体顺序）。 */
+        /**
+         * 备份覆盖的全部用户数据表（Room v14 实体顺序，11 表）。
+         * T33/#34 起纳入 clock_handoffs（系统闹钟交接记录）：交接记录是本应用发起的
+         * 待核对请求与失败回退痕迹，属于需要完整恢复的业务可追溯数据。
+         */
         val BACKUP_TABLES = listOf(
             "tasks",
             "sub_tasks",
@@ -645,6 +757,7 @@ class BackupUseCases(
             "calendar_reminders",
             "occurrence_subtask_records",
             "memories",
+            "clock_handoffs",
         )
 
         /**
@@ -652,7 +765,7 @@ class BackupUseCases(
          * tasks → sub_tasks / task_occurrences / reminders（挂 tasks）→
          * occurrence_subtask_records（挂 tasks+sub_tasks+task_occurrences）→
          * calendar_entries（挂 tasks，SET_NULL）→ calendar_reminders（挂 calendar_entries）→
-         * notes → note_list_items（挂 notes）→ memories（无外键）。
+         * notes → note_list_items（挂 notes）→ memories（无外键）→ clock_handoffs（无外键）。
          * 清空时取逆序（子表先删）。
          */
         private val RESTORE_ORDER = listOf(
@@ -666,6 +779,7 @@ class BackupUseCases(
             "notes",
             "note_list_items",
             "memories",
+            "clock_handoffs",
         )
 
         /** 文件头 magic（ASCII），用于快速识别知时鹿备份文件。 */
