@@ -16,6 +16,10 @@ interface CalendarEntryDao {
     @Query("SELECT * FROM calendar_entries WHERE id = :id")
     suspend fun get(id: String): CalendarEntryEntity?
 
+    /** 关联维护专用：按 taskId 读取全部日程（含回收站记录），供解除关联等维护动作使用。 */
+    @Query("SELECT * FROM calendar_entries WHERE taskId = :taskId")
+    suspend fun getByTaskId(taskId: String): List<CalendarEntryEntity>
+
     @Upsert
     suspend fun upsert(entry: CalendarEntryEntity)
 

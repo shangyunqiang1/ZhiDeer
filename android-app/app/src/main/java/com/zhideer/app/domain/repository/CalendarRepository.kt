@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.Flow
 interface CalendarRepository {
     fun observeEntries(): Flow<List<CalendarEntry>>
     suspend fun getEntry(id: String): CalendarEntry?
+
+    /** 关联维护专用：某待办关联的全部日程（含回收站记录），供解除关联等维护动作使用。 */
+    suspend fun getEntriesLinkedToTask(taskId: String): List<CalendarEntry>
     suspend fun upsertEntry(entry: CalendarEntry)
     suspend fun trashEntry(id: String, trashedAtMillis: Long)
 }
