@@ -9,12 +9,14 @@ import com.zhideer.app.data.ai.DeepSeekChatClient
 import com.zhideer.app.data.ai.EncryptedAiConfigStore
 import com.zhideer.app.data.ai.RepositoryAiContextProvider
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.data.repository.CalendarRemindersRepositoryImpl
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.RemindersRepositoryImpl
 import com.zhideer.app.data.repository.SubTasksRepositoryImpl
 import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
+import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.RemindersRepository
@@ -24,6 +26,7 @@ import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
+import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.RecurrenceUseCases
@@ -127,11 +130,28 @@ class AppContainer(
 
     val calendarRepository: CalendarRepository = CalendarRepositoryImpl(database.calendarEntryDao(), Dispatchers.IO)
 
+    // T09/#10 纯新增：日程提醒仓库与用例先于日程用例组装，
+    // 供改期重算（onTimesChanged）与回收站删除停止提醒（onTrashed）的联动钩子引用。
+    val calendarRemindersRepository: CalendarRemindersRepository =
+        CalendarRemindersRepositoryImpl(database.calendarReminderDao(), Dispatchers.IO)
+
+    val calendarReminderUseCases: CalendarReminderUseCases = CalendarReminderUseCases(
+        repository = calendarRemindersRepository,
+        calendarRepository = calendarRepository,
+        scheduler = alarmScheduler,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
+    )
+
     val calendarUseCases: CalendarUseCases = CalendarUseCases(
         repository = calendarRepository,
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
         zoneId = zoneId.id,
+        // #10：日程改期/时区重解释后相对提醒随开始时刻移动，独立时刻提醒不动
+        onTimesChanged = { entryId -> calendarReminderUseCases.rescheduleForStartChange(entryId) },
+        // #10：日程删除（回收站）时停止其自身提醒，不影响关联待办自身的提醒
+        onTrashed = { entryId -> calendarReminderUseCases.cancelReminders(entryId) },
     )
 
     val notesRepository: NotesRepository = NotesRepositoryImpl(database.noteDao(), Dispatchers.IO)
