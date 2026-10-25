@@ -38,6 +38,7 @@ import com.zhideer.app.domain.usecase.AdvisorUseCases
 import com.zhideer.app.domain.usecase.BackupUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
+import com.zhideer.app.domain.usecase.HomeUseCases
 import com.zhideer.app.domain.usecase.MemoryUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases
@@ -362,6 +363,10 @@ class AppContainer(
     // 采纳 = suggestionToProposal 落 PENDING 操作提案（sessionId = null），
     // 此后完全复用既有提案状态机（aiProposalUseCases.confirmProposal 确认执行）。
     // 生成与查看建议绝不写业务仓库；记忆类建议仅在 MEMORY 类别授权后读取活动记忆。
+    val homeUseCases: HomeUseCases by lazy {
+        HomeUseCases(taskUseCases, calendarUseCases, zoneId, nowMillis)
+    }
+
     val advisorUseCases: AdvisorUseCases by lazy {
         AdvisorUseCases(
             taskUseCases = taskUseCases,

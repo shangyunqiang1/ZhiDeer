@@ -61,6 +61,10 @@ fun TasksScreen(
     reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
     recurrenceUseCases: com.zhideer.app.domain.usecase.RecurrenceUseCases,
     occurrenceSubTaskUseCases: com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases,
+    initialDetailTask: TodoTask? = null,
+    onDetailTaskConsumed: () -> Unit = {},
+    initialCreating: Boolean = false,
+    onCreatingConsumed: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var filter by remember { mutableStateOf(TaskFilter.TODAY) }
@@ -72,6 +76,18 @@ fun TasksScreen(
     var candidateFuture by remember { mutableStateOf(emptyList<com.zhideer.app.domain.model.CalendarEntry>()) }
     var cancelCandidate by remember { mutableStateOf<TodoTask?>(null) }
     var cancelFuture by remember { mutableStateOf(emptyList<com.zhideer.app.domain.model.CalendarEntry>()) }
+    androidx.compose.runtime.LaunchedEffect(initialDetailTask) {
+        if (initialDetailTask != null) {
+            viewing = initialDetailTask
+            onDetailTaskConsumed()
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(initialCreating) {
+        if (initialCreating) {
+            creating = true
+            onCreatingConsumed()
+        }
+    }
 
     val tasks by remember(filter) {
         useCases.observe(filter)
