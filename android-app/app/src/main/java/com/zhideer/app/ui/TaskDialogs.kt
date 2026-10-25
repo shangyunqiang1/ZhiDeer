@@ -64,6 +64,8 @@ fun TaskEditorDialog(
             } ?: "",
         )
     }
+    var recurrenceRule by remember { mutableStateOf(initial?.recurrenceRule) }
+    var showRecurrence by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun buildInput(): TaskInput? {
@@ -103,13 +105,13 @@ fun TaskEditorDialog(
             dueEpochDay = dueDay,
             dueAtMillis = dueAt,
             dueZoneId = zoneId.id,
+            recurrenceRule = recurrenceRule,
         )
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial == null) "新建待办" else "编辑待办") },
-        text = {
+        title = { Text(if (initial == null) "新建待办" else "编辑待办") },        text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(
                     value = title,
@@ -174,6 +176,18 @@ fun TaskEditorDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                Text("重复（可选）", style = MaterialTheme.typography.labelLarge)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    FilterChip(
+                        selected = recurrenceRule != null,
+                        onClick = { showRecurrence = true },
+                        label = { Text(if (recurrenceRule == null) "不重复" else "已设置") },
+                    )
+                    if (recurrenceRule != null) {
+                        TextButton(onClick = { recurrenceRule = null }) { Text("清除") }
+                    }
+                }
+                RecurrenceRuleSummaryText(recurrenceRule)
                 error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }
@@ -188,6 +202,18 @@ fun TaskEditorDialog(
             TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
+    if (showRecurrence) {
+        val anchorDay = initial?.let {
+            Instant.ofEpochMilli(it.createdAt).atZone(zoneId).toLocalDate().toEpochDay()
+        } ?: LocalDate.now(zoneId).toEpochDay()
+        RecurrenceEditorDialog(
+            anchorEpochDay = anchorDay,
+            todayEpochDay = LocalDate.now(zoneId).toEpochDay(),
+            initialRule = recurrenceRule,
+            onDismiss = { showRecurrence = false },
+            onSave = { recurrenceRule = it; showRecurrence = false },
+        )
+    }
 }
 
 private enum class DueKind { NONE, DATE, TIME }

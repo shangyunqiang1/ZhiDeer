@@ -249,6 +249,9 @@ private fun TaskRow(
             if (task.category.isNotBlank()) {
                 Text("分类：${task.category}", style = MaterialTheme.typography.bodySmall)
             }
+            if (task.recurrenceRule != null) {
+                RecurrenceRuleSummaryText(task.recurrenceRule, Modifier)
+            }
         }
         StatusTag(task)
         TextButton(onClick = onClick) { Text("详情") }
