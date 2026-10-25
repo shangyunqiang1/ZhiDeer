@@ -279,9 +279,10 @@ class AppContainer(
         )
     }
 
-    // —— 操作提案（T19/#20）：纯新增装配 ——
+    // —— 操作提案（T19/#20，T20/#21 扩展日程与提醒）：纯新增装配 ——
     // 提案草稿存 DataStore JSON（有意避开 Room，数据库零改动）；
-    // 确认创建走 taskUseCases/noteUseCases 真实入口（不绕过），忽略/幂等状态机在用例层。
+    // 确认创建走 taskUseCases/noteUseCases/calendarUseCases/calendarReminderUseCases 真实入口（不绕过），
+    // 忽略/幂等状态机在用例层。
     val aiProposalStore: AiProposalStore by lazy {
         AiProposalStore(File(context.filesDir, "ai_proposals.preferences_pb"))
     }
@@ -292,6 +293,9 @@ class AppContainer(
             store = aiProposalStore,
             taskUseCases = taskUseCases,
             noteUseCases = noteUseCases,
+            // T20/#21 纯新增：日程提案确认后经日程与日程提醒真实入口创建
+            calendarUseCases = calendarUseCases,
+            calendarReminderUseCases = calendarReminderUseCases,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,

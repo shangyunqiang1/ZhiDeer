@@ -51,6 +51,8 @@ import com.zhideer.app.domain.usecase.AiConfigInput
 import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.AiProposalUseCases
 import com.zhideer.app.domain.usecase.proposalDueText
+import com.zhideer.app.domain.usecase.proposalReminderText
+import com.zhideer.app.domain.usecase.proposalScheduleRangeText
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -59,11 +61,12 @@ import java.time.format.DateTimeFormatter
 private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
 /**
- * AI 助手主界面（T17/#18、T18/#19、T19/#20），公开供根导航挂载：
+ * AI 助手主界面（T17/#18、T18/#19、T19/#20、T20/#21），公开供根导航挂载：
  * - 会话列表 + 新建会话 + 重开 + 删除；
  * - 聊天视图：多轮流式回复、发送/停止、生成中可取消；
- * - 创建模式（#20）：开启后发送走提案路径——AI 起草待办/便签操作提案，
+ * - 创建模式（#20/#21）：开启后发送走提案路径——AI 起草待办/便签/日程操作提案，
  *   提案以卡片呈现在对话流中（完整字段预览 + 「确认创建」「忽略」与逐项「移除」），
+ *   日程卡片显示按创建时区换算的时间范围（跨日明确显示）、地点/分类/备注与提醒摘要（无提醒明确标注），
  *   确认前绝不写入业务数据，确认后回执含已创建记录标识写回对话；
  * - 授权面板（#19）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签），
  *   各类别独立勾选、整体确认授权、可随时撤销；对话页显示"已授权范围"徽标；
@@ -359,14 +362,14 @@ private fun ChatView(
                 }
             }
         }
-        // #20：创建模式开关——开启后 AI 把一句话起草为待办/便签操作提案，确认后才创建
+        // #20/#21：创建模式开关——开启后 AI 把一句话起草为待办/便签/日程操作提案，确认后才创建
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
         ) {
             Checkbox(checked = createMode, onCheckedChange = onCreateModeChange)
             Text(
-                "创建模式：让 AI 起草待办/便签提案（确认后才会创建）",
+                "创建模式：让 AI 起草待办/便签/日程提案（确认后才会创建）",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -658,8 +661,8 @@ private fun AiContextPanel(
 }
 
 /**
- * 操作提案卡片（#20）：完整字段预览（截止按创建时区换算的可读时间）+ 状态标记 +
- * 「确认创建」「忽略」按钮与逐项「移除」。PENDING 才有操作按钮；
+ * 操作提案卡片（#20/#21）：完整字段预览（截止/日程时间按创建时区换算的可读时间，跨日明确显示）+
+ * 状态标记 +「确认创建」「忽略」按钮与逐项「移除」。PENDING 才有操作按钮；
  * EXECUTED 显示含已创建记录标识的中文回执；CONFIRMED 显示结果待核实；EXPIRED 不残留可执行操作。
  */
 @Composable
@@ -720,7 +723,7 @@ private fun ProposalCard(
     }
 }
 
-/** 提案条目字段预览：待办（截止/优先级/分类/备注）或便签（正文/标签/清单项），保留原话不改写。 */
+/** 提案条目字段预览：待办（截止/优先级/分类/备注）、便签（正文/标签/清单项）或日程（时间/地点/分类/备注/提醒），保留原话不改写。 */
 @Composable
 private fun ProposalItemRow(
     item: AiProposalItem,
@@ -731,7 +734,11 @@ private fun ProposalItemRow(
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                if (item.kind == AiProposalKind.TASK) "[待办]" else "[便签]",
+                when (item.kind) {
+                    AiProposalKind.TASK -> "[待办]"
+                    AiProposalKind.NOTE -> "[便签]"
+                    AiProposalKind.SCHEDULE -> "[日程]"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -757,6 +764,15 @@ private fun ProposalItemRow(
                     if (item.content.isNotBlank()) add("正文：${item.content}")
                     if (item.tags.isNotEmpty()) add("标签：${item.tags.joinToString("、")}")
                     item.items.forEachIndexed { index, text -> add("清单${index + 1}：$text") }
+                }
+                // T20/#21 日程：时间按创建时区换算可读（跨日明确显示），提醒显式给出无提醒状态
+                AiProposalKind.SCHEDULE -> {
+                    proposalScheduleRangeText(item, zoneId)?.let { add("时间：$it") }
+                    add("时区：${zoneId.id}")
+                    if (item.location.isNotBlank()) add("地点：${item.location}")
+                    if (item.category.isNotBlank()) add("分类：${item.category}")
+                    if (item.note.isNotBlank()) add("备注：${item.note}")
+                    add("提醒：" + (proposalReminderText(item, zoneId) ?: "无"))
                 }
             }
         }
