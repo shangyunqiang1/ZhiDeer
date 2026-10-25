@@ -8,6 +8,7 @@ import com.zhideer.app.domain.model.AiProposalOp
 import com.zhideer.app.domain.model.AiProposalReminderSpec
 import com.zhideer.app.domain.model.AiProposalReminderType
 import com.zhideer.app.domain.model.AiProposalTargetRecord
+import com.zhideer.app.domain.model.MemoryType
 import com.zhideer.app.domain.model.TaskPriority
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -71,6 +72,8 @@ private data class ProposalItemDto(
     val target: ProposalTargetDto? = null,
     val changes: ProposalChangesDto? = null,
     val action: String? = null,
+    // T28/#29 记忆条目字段：preference（偏好）或 fact（事实），缺省按事实处理
+    val memoryType: String? = null,
 )
 
 /** 修改/删除提案的目标定位线索（T21/#22）：kind 为目标类型，title 为用户原话中的名称或关键词。 */
@@ -127,7 +130,7 @@ internal fun extractProposalJson(raw: String): String? {
 /** 生成注入请求的提案协议 system 提示（注入今天日期与时区，供模型推算相对日期）。 */
 internal fun buildProposalSystemPrompt(today: LocalDate, zoneId: ZoneId): String = buildString {
     appendLine("你是知时鹿（一款本地日程、待办与便签应用）的 AI 助手。")
-    appendLine("当用户明确想新增待办、便签或日程时，在回复的最末尾输出一个 ```json 代码块起草操作提案；提案只是供用户核对的草案，用户确认后才会真正保存。")
+    appendLine("当用户明确想新增待办、便签或日程，或明确要求记住某条偏好/事实时，在回复的最末尾输出一个 ```json 代码块起草操作提案；提案只是供用户核对的草案，用户确认后才会真正保存。")
     appendLine("今天是 $today（${weekdayCn(today)}），用户时区 ${zoneId.id}。涉及相对日期（明天、下周三等）时按今天推算，一律写绝对日期。")
     appendLine("JSON 结构（proposals 数组可含多项）：")
     appendLine("```json")
@@ -138,12 +141,13 @@ internal fun buildProposalSystemPrompt(today: LocalDate, zoneId: ZoneId): String
             "{\"kind\":\"note\",\"title\":\"标题\",\"content\":\"正文\",\"tags\":[\"标签\"],\"items\":[\"清单项\"]}," +
             "{\"kind\":\"schedule\",\"title\":\"标题\",\"start\":\"2026-10-26T14:00\",\"end\":\"2026-10-26T15:30\"," +
             "\"location\":\"地点\",\"note\":\"备注\",\"category\":\"分类\"," +
-            "\"reminder\":{\"type\":\"relative\",\"offsetMillis\":900000}}" +
+            "\"reminder\":{\"type\":\"relative\",\"offsetMillis\":900000}}," +
+            "{\"kind\":\"memory\",\"content\":\"要记住的内容原话\",\"memoryType\":\"preference\"|\"fact\"}" +
             "]}",
     )
     appendLine("```")
     appendLine("字段规则：")
-    appendLine("1. 新增提案 kind 只能是 \"task\"（待办）、\"note\"（便签）或 \"schedule\"（日程），title 必填且不能为空；修改与删除提案 kind 为 \"modify\" 或 \"delete\"，目标写在 target 字段（见规则 9-11）。")
+    appendLine("1. 新增提案 kind 只能是 \"task\"（待办）、\"note\"（便签）、\"schedule\"（日程）或 \"memory\"（长期记忆），title 必填且不能为空（memory 条目除外，见规则 12）；修改与删除提案 kind 为 \"modify\" 或 \"delete\"，目标写在 target 字段（见规则 9-11）。")
     appendLine("2. task 可选字段：note（备注）、priority（LOW/NORMAL/HIGH，默认 NORMAL）、category（分类）、dueDate 或 dueAt。")
     appendLine("3. dueDate 是日期截止（yyyy-MM-dd，不含具体时刻）；dueAt 是具体时刻截止（yyyy-MM-dd'T'HH:mm）。两者只能选其一，绝不同时给出；日期截止不要补 23:59 之类的时刻。")
     appendLine("4. 用户提到的时间不明确（如\"尽快\"或说不清具体哪天）时，先用文字向用户追问，确认后再输出 JSON；绝不编造日期。")
@@ -154,6 +158,7 @@ internal fun buildProposalSystemPrompt(today: LocalDate, zoneId: ZoneId): String
     appendLine("9. 修改提案结构：{\"kind\":\"modify\",\"target\":{\"kind\":\"task\"|\"note\"|\"schedule\",\"title\":\"用户提到的名称\"},\"changes\":{...}}。target.title 一律用用户原话中的名称或关键词，不改写不补全；系统会按它在本地记录中定位目标，匹配到多条时由用户挑选。changes 只包含用户明确要改的字段，没提到的字段绝不给出。task 可改：title、note、priority、category、dueDate、dueAt、clearDue（true 表示清空截止）、completed（true 完成、false 撤销完成）；note 可改：title、content、tags、items；schedule 可改：title、start、end（改时间必须同时给出新的 start 与 end）、location、note、category。跨类型字段绝不出现在 changes 中，顶层也绝不携带 title/dueDate/priority 等创建字段。")
     appendLine("10. 删除/取消提案结构：{\"kind\":\"delete\",\"target\":{\"kind\":...,\"title\":...},\"action\":\"cancel\"|\"trash\"}。用户说不再做某个待办 → action:\"cancel\"（取消待办：保留记录并停止其提醒，不是删除）；说删除 → \"trash\"；便签与日程只有删除语义，action 用 \"trash\" 或省略。删除提案绝不带 changes 字段。")
     appendLine("11. 用户没说清要改哪一条、要改什么内容，或说不清是取消还是删除时，先用文字向用户追问，确认后再输出 JSON；绝不猜测目标，绝不编造不存在的记录。")
+    appendLine("12. 长期记忆提案结构：{\"kind\":\"memory\",\"content\":\"用户原话\",\"memoryType\":\"preference\"|\"fact\"}。只在用户明确要求记住（如\"记住：…\"\"帮我记住…\"）时输出；content 一律用用户原话，不改写不扩写；memoryType 写 \"preference\"（习惯、喜好与倾向）或 \"fact\"（客观信息，如过敏、住址、家庭成员），判断不了时省略（按 fact 处理）。绝不为普通聊天总结或你没被明确要求记住的内容起草记忆提案；记忆没有截止时间和优先级，绝不携带 dueDate/dueAt/priority 等其他创建字段。")
 }
 
 private fun weekdayCn(date: LocalDate): String =
@@ -199,7 +204,7 @@ internal fun parseProposalReply(raw: String, zoneId: ZoneId, idGen: () -> String
     return AiProposalParseOutcome.Drafts(items)
 }
 
-/** 按顶层 kind 分派：task/note/schedule 为新增，modify/delete 为修改与删除（T21/#22）。 */
+/** 按顶层 kind 分派：task/note/schedule/memory 为新增，modify/delete 为修改与删除（T21/#22、T28/#29）。 */
 private fun parseProposalItem(
     dto: ProposalItemDto,
     n: Int,
@@ -209,9 +214,59 @@ private fun parseProposalItem(
     "task" -> parseCreateItem(dto, n, AiProposalKind.TASK, zoneId, idGen)
     "note" -> parseCreateItem(dto, n, AiProposalKind.NOTE, zoneId, idGen)
     "schedule" -> parseCreateItem(dto, n, AiProposalKind.SCHEDULE, zoneId, idGen)
+    "memory" -> parseMemoryItem(dto, n, idGen)
     "modify" -> parseModifyItem(dto, n, zoneId, idGen)
     "delete" -> parseDeleteItem(dto, n, idGen)
-    else -> throw ProposalFieldException("第 $n 项提案的类型无法识别（kind 只能是 task、note、schedule、modify 或 delete）。")
+    else -> throw ProposalFieldException(
+        "第 $n 项提案的类型无法识别（kind 只能是 task、note、schedule、memory、modify 或 delete）。",
+    )
+}
+
+/**
+ * 解析记忆条目（T28/#29 纯新增）：content 为用户原话（必填，不改写），
+ * memoryType 只能是 preference（偏好）或 fact（事实），缺省按 fact。
+ * 记忆没有截止时间与优先级，携带其他创建字段时整批拒绝（可诊断提示）。
+ */
+private fun parseMemoryItem(dto: ProposalItemDto, n: Int, idGen: () -> String): AiProposalItem {
+    if (dto.target != null || dto.changes != null || dto.action != null) {
+        throw ProposalFieldException("第 $n 项提案是记忆类型，不应包含修改或删除字段（target/changes/action）。")
+    }
+    val hasForeign = !dto.note.isNullOrEmpty() || !dto.priority.isNullOrEmpty() ||
+        !dto.category.isNullOrEmpty() || !dto.dueDate.isNullOrEmpty() || !dto.dueAt.isNullOrEmpty() ||
+        !dto.tags.isNullOrEmpty() || !dto.items.isNullOrEmpty() || !dto.start.isNullOrEmpty() ||
+        !dto.end.isNullOrEmpty() || !dto.location.isNullOrEmpty() || dto.reminder != null ||
+        !dto.reminders.isNullOrEmpty()
+    if (hasForeign) {
+        throw ProposalFieldException(
+            "第 $n 项提案是记忆类型，只支持 content 与 memoryType 字段（记忆没有截止时间、优先级或清单等属性）。",
+        )
+    }
+    val content = dto.content?.trim().orEmpty()
+    if (content.isEmpty()) {
+        throw ProposalFieldException("第 $n 项记忆提案缺少内容（content）：请给出要记住的用户原话。")
+    }
+    val memoryTypeRaw = dto.memoryType?.trim()?.lowercase(Locale.ROOT)
+    val memoryType = when (memoryTypeRaw) {
+        null, "" -> "FACT"
+        "preference" -> "PREFERENCE"
+        "fact" -> "FACT"
+        else -> throw ProposalFieldException(
+            "第 $n 项记忆提案的类型无法识别（memoryType 只能是 preference（偏好）或 fact（事实））。",
+        )
+    }
+    return AiProposalItem(
+        id = idGen(),
+        kind = AiProposalKind.MEMORY,
+        title = memoryTitleOf(dto, content),
+        content = content,
+        memoryType = memoryType,
+    )
+}
+
+/** 记忆条目无标题概念：展示摘要取模型给的 title，否则用内容前缀截断（原文不受影响）。 */
+private fun memoryTitleOf(dto: ProposalItemDto, content: String): String {
+    val given = dto.title?.trim().orEmpty()
+    return if (given.isNotEmpty()) given else content.take(MEMORY_TITLE_MAX) + if (content.length > MEMORY_TITLE_MAX) "…" else ""
 }
 
 /** 目标 DTO → 目标类型；缺失或非法给出中文可诊断提示。 */
@@ -291,6 +346,9 @@ private fun parseDeleteItem(dto: ProposalItemDto, n: Int, idGen: () -> String): 
             "cancel" -> throw ProposalFieldException("第 $n 项删除提案动作非法：日程没有取消语义，只有删除（action 只能是 trash 或省略）。")
             else -> throw ProposalFieldException("第 $n 项删除提案的动作无法识别（action 只能是 trash 或省略）。")
         }
+        // T28/#29：记忆条目只支持新增提案（targetKindOf 不会给出 MEMORY，此分支为穷举防御）
+        AiProposalKind.MEMORY ->
+            throw ProposalFieldException("第 $n 项删除提案目标类型非法（记忆不支持删除提案，可在记忆页面停用或删除）。")
     }
     return AiProposalItem(
         id = idGen(),
@@ -312,6 +370,9 @@ private fun parseChanges(dto: ProposalChangesDto, kind: AiProposalKind, n: Int, 
         AiProposalKind.TASK -> parseTaskChanges(dto, n, zoneId, title)
         AiProposalKind.NOTE -> parseNoteChanges(dto, n, title)
         AiProposalKind.SCHEDULE -> parseScheduleChanges(dto, n, zoneId, title)
+        // T28/#29：记忆条目只支持新增提案（targetKindOf 不会给出 MEMORY，此分支为穷举防御）
+        AiProposalKind.MEMORY ->
+            throw ProposalFieldException("第 $n 项修改提案目标类型非法（记忆不支持修改提案，可在记忆页面编辑）。")
     }
 }
 
@@ -648,16 +709,22 @@ internal fun summarizeProposal(items: List<AiProposalItem>, zoneId: ZoneId): Str
                     }
                     if (details.isNotEmpty()) append("（").append(details.joinToString("，")).append("）")
                 }
+                // T28/#29 记忆条目摘要：类型 + 原文（原话不改写）
+                AiProposalKind.MEMORY -> {
+                    append("[记忆] ").append(item.content)
+                    append("（").append(memoryTypeCn(item.memoryType)).append("）")
+                }
             }
         }
     }
 }
 
-/** 目标类型的中文统称（T21/#22）。 */
+/** 目标类型的中文统称（T21/#22、T28/#29 扩展记忆）。 */
 internal fun kindCn(kind: AiProposalKind): String = when (kind) {
     AiProposalKind.TASK -> "待办"
     AiProposalKind.NOTE -> "便签"
     AiProposalKind.SCHEDULE -> "日程"
+    AiProposalKind.MEMORY -> "记忆"
 }
 
 /** 变更集涉及的字段名列表（摘要与预览共用）。 */
@@ -818,6 +885,12 @@ private fun offsetMillisCn(offsetMillis: Long): String {
     }.joinToString(" ")
 }
 
+/** 记忆条目类型的中文统称（摘要与卡片共用）。 */
+internal fun memoryTypeCn(memoryType: String): String = when (memoryType.uppercase(Locale.ROOT)) {
+    "PREFERENCE" -> "偏好"
+    else -> "事实"
+}
+
 internal fun priorityCn(priority: String): String = when (priority) {
     "LOW" -> "低"
     "HIGH" -> "高"
@@ -825,6 +898,15 @@ internal fun priorityCn(priority: String): String = when (priority) {
 }
 
 private val SUPPORTED_PRIORITIES = setOf("LOW", "NORMAL", "HIGH")
+
+/** 记忆条目展示摘要的最大长度（原文截断仅用于卡片标题，保存的原文不受影响）。 */
+internal const val MEMORY_TITLE_MAX = 12
+
+/** 记忆条目类型字符串 → 记忆类型（解析层已归一化为 PREFERENCE/FACT）。 */
+internal fun memoryTypeOf(memoryType: String): MemoryType = when (memoryType.uppercase(Locale.ROOT)) {
+    "PREFERENCE" -> MemoryType.PREFERENCE
+    else -> MemoryType.FACT
+}
 
 /** 供确认执行路径把条目换算为待办/便签输入（编码校验在解析层完成）。 */
 internal fun AiProposalItem.toTaskInput(zoneId: ZoneId): TaskInput = TaskInput(
@@ -842,6 +924,12 @@ internal fun AiProposalItem.toNoteInput(): NoteInput = NoteInput(
     content = content,
     tags = tags,
     items = items.map { NoteListItemInput(text = it) },
+)
+
+/** 供确认执行路径把记忆条目换算为记忆输入（T28/#29）：原文原样，类型按条目字段。 */
+internal fun AiProposalItem.toMemoryInput(): MemoryInput = MemoryInput(
+    content = content,
+    type = memoryTypeOf(memoryType),
 )
 
 /** 供确认执行路径把日程条目换算为日历创建输入（编码校验在解析层与 [validateProposalItem] 完成）。 */
@@ -886,6 +974,7 @@ internal fun validateProposalItem(item: AiProposalItem): String? = when (item.op
             "日程缺少开始或结束时间"
         item.kind == AiProposalKind.SCHEDULE && item.endMillis!! < item.startMillis!! ->
             "结束时间早于开始时间"
+        item.kind == AiProposalKind.MEMORY && item.content.isBlank() -> "记忆内容为空"
         item.reminders.isNotEmpty() &&
             item.reminders.firstNotNullOfOrNull { reminderSpecProblem(it, item.startMillis) } != null ->
             "提醒字段非法：" + item.reminders.firstNotNullOfOrNull { reminderSpecProblem(it, item.startMillis) }

@@ -17,9 +17,10 @@ data class MemoryInput(
 
 /**
  * 统一长期记忆用例入口：创建、编辑、停用启用、删除、观察与搜索。
- * - 只有用户显式保存并确认的内容成为长期记忆（GLOSSARY：长期记忆）；本任务唯一
- *   写入入口是用户手动录入，确认状态恒为已确认，不存在自动提取或未确认写入路径，
- *   因此“未确认不覆盖”天然满足；会话来源与新旧冲突展示由后续接入聊天的任务交付。
+ * - 只有用户显式保存并确认的内容成为长期记忆（GLOSSARY：长期记忆）；写入入口为
+ *   用户手动录入（来源 MANUAL）与聊天确认保存（T28/#29 纯新增，来源 CHAT：用户在
+ *   聊天中明确要求记住、经操作提案确认后才走本入口，确认即已确认，不存在自动提取
+ *   或未确认写入路径），因此“未确认不覆盖”天然满足；
  * - 内容保存用户原文，不做自动扩写，不自动推断敏感属性；
  * - 停用是可逆的软禁用，停用或过期内容不进入可用记忆集合；
  * - 删除是彻底删除（物理删除）：记忆是独立于便签与待办的隐私数据，不进入回收站、
@@ -33,7 +34,14 @@ class MemoryUseCases(
 ) {
 
     /** 显式保存一条长期记忆：手动录入即用户确认保存，来源恒为手动录入。 */
-    suspend fun create(input: MemoryInput): Result<Memory> {
+    suspend fun create(input: MemoryInput): Result<Memory> = create(input, MemorySource.MANUAL)
+
+    /**
+     * 按来源显式保存一条长期记忆（T28/#29 纯新增重载；默认手动录入零回归）：
+     * 调用方必须已在交互中取得用户确认（手动保存或操作提案确认），此处写入即已确认；
+     * 来源随记忆持久化，保证可追溯（GLOSSARY：长期记忆具有可追溯的来源）。
+     */
+    suspend fun create(input: MemoryInput, source: MemorySource): Result<Memory> {
         val error = validate(input)
         if (error != null) return Result.failure(IllegalArgumentException(error))
         val t = now()
@@ -41,7 +49,7 @@ class MemoryUseCases(
             id = idGen(),
             content = input.content.trim(),
             type = input.type,
-            source = MemorySource.MANUAL,
+            source = source,
             confirmed = true,
             enabled = true,
             createdAt = t,
@@ -96,7 +104,8 @@ class MemoryUseCases(
 
     /**
      * 可用记忆集合：仅含已确认、未停用且未过期的记忆（issue #27：过期或停用内容
-     * 不进入可用记忆集合）。供后续 AI 检索任务使用；本任务不接入任何 AI 功能。
+     * 不进入可用记忆集合）。T28/#29 起供 AI 聊天检索使用（仍须经记忆授权门，
+     * 见 [AiContextCategory.MEMORY]）。
      */
     fun observeActive(): Flow<List<Memory>> = repository.observeMemories().map { memories ->
         val t = now()

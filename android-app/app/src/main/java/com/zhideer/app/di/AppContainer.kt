@@ -199,7 +199,7 @@ class AppContainer(
     // —— T26/#27 长期记忆：纯新增装配 ——
     // 记忆是独立于便签与待办的隐私数据：独立 memories 表与独立入口，删除即彻底删除
     // （不进回收站、不套普通事项三十天保留规则）；只有用户显式保存并确认的内容成为
-    // 长期记忆，不参与 AI 上下文快照（授权边界由 #19 体系管理，本任务零耦合）。
+    // 长期记忆（T28/#29 起含聊天确认来源），是否随 AI 请求外发由授权体系管理。
     val memoriesRepository: MemoriesRepository =
         MemoriesRepositoryImpl(database.memoryDao(), Dispatchers.IO)
 
@@ -253,7 +253,7 @@ class AppContainer(
 
     val aiChatClient: DeepSeekChatClient by lazy { DeepSeekChatClient() }
 
-    // —— 授权上下文（T18/#19）：纯新增装配 ——
+    // —— 授权上下文（T18/#19，T28/#29 扩展记忆段）：纯新增装配 ——
     // 会话级授权状态（纯内存）与真实记录快照提供者（只读，不回写业务数据）。
     val aiContextAuthorizer: AiContextAuthorizer by lazy { AiContextAuthorizer() }
 
@@ -262,6 +262,8 @@ class AppContainer(
             tasksRepository = tasksRepository,
             calendarRepository = calendarRepository,
             notesRepository = notesRepository,
+            // T28/#29：长期记忆段同样只读授权类别（MEMORY 默认关闭，勾选后才外发）
+            memoriesRepository = memoriesRepository,
             zoneId = zoneId,
             now = nowMillis,
         )
@@ -280,10 +282,10 @@ class AppContainer(
         )
     }
 
-    // —— 操作提案（T19/#20，T20/#21 扩展日程与提醒）：纯新增装配 ——
+    // —— 操作提案（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除，T28/#29 扩展记忆）：纯新增装配 ——
     // 提案草稿存 DataStore JSON（有意避开 Room，数据库零改动）；
-    // 确认创建走 taskUseCases/noteUseCases/calendarUseCases/calendarReminderUseCases 真实入口（不绕过），
-    // 忽略/幂等状态机在用例层。
+    // 确认创建走 taskUseCases/noteUseCases/calendarUseCases/calendarReminderUseCases/memoryUseCases
+    // 真实入口（不绕过），忽略/幂等状态机在用例层。
     val aiProposalStore: AiProposalStore by lazy {
         AiProposalStore(File(context.filesDir, "ai_proposals.preferences_pb"))
     }
@@ -310,6 +312,8 @@ class AppContainer(
             calendarReminderUseCases = calendarReminderUseCases,
             // T21/#22 纯新增：修改/删除提案的目标定位
             targetMatcher = aiProposalTargetMatcher,
+            // T28/#29 纯新增：记忆提案确认后经长期记忆真实入口保存（来源聊天确认）
+            memoryUseCases = memoryUseCases,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,
