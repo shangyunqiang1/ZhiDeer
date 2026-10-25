@@ -200,6 +200,7 @@ fun TaskDetailDialog(
     subTaskUseCases: com.zhideer.app.domain.usecase.SubTaskUseCases,
     linkUseCases: com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases,
     calendarUseCases: com.zhideer.app.domain.usecase.CalendarUseCases,
+    reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
     onDismiss: () -> Unit,
     onEdit: () -> Unit,
     onPostponeTomorrow: () -> Unit,
@@ -230,6 +231,13 @@ fun TaskDetailDialog(
                     useCases = subTaskUseCases,
                     parentId = task.id,
                     zoneId = zoneId,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                com.zhideer.app.ui.RemindersPanel(
+                    useCases = reminderUseCases,
+                    taskId = task.id,
+                    zoneId = zoneId,
+                    dueAtMillis = task.dueAtMillis,
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
