@@ -13,6 +13,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -32,13 +33,18 @@ data class AiConfigView(
 )
 
 /**
- * 统一 AI 对话用例入口（T17/#18）：
+ * 统一 AI 对话用例入口（T17/#18、T18/#19）：
  * - [saveConfig]/[loadConfig]/[testConnection]：配置 API Key（加密存储）、模型标识与 Base URL；
- * - [sendStreaming]/[cancelGeneration]：多轮流式对话与取消；
+ * - [sendStreaming]/[cancelGeneration]：多轮流式对话与取消（请求只含会话内消息，语义不变）；
+ * - [sendWithAuthorizedContext]：显式授权后把真实记录快照注入请求（#19）；
+ * - [authorizeContext]/[revokeContextAuthorization]/[observeContextGrant]：会话级授权状态；
  * - [listSessions]/[openSession]/[deleteSession]：本地会话历史（DataStore，避开 Room）。
  *
  * 边界约定（对应用户故事验收）：
- * - 请求体只包含会话内消息；在上下文授权任务（#19/T18）完成前，不上传本地事项、长期记忆或其他历史；
+ * - [sendStreaming] 请求体只包含会话内消息；
+ * - [sendWithAuthorizedContext] 必须先经 [AiContextAuthorizer] 显式授权：未授权拒绝发送；
+ *   注入的快照只含授权类别的真实记录，未授权类别即使出现在快照中也不渲染；
+ * - 快照只注入请求、不落盘、不回写业务数据（本任务只读）；
  * - 取消生成只停止接收：不保存部分回复，不产生任何业务写入，已发送的用户消息保留；
  * - 所有失败以中文可诊断提示返回，不把英文裸异常抛给 UI。
  */
@@ -48,6 +54,8 @@ class AiChatUseCases(
     private val client: DeepSeekChatClient,
     private val idGen: () -> String,
     private val now: () -> Long,
+    private val contextAuthorizer: AiContextAuthorizer,
+    private val contextProvider: AiContextProvider,
 ) {
 
     @Volatile
@@ -89,16 +97,85 @@ class AiChatUseCases(
     // ---------- 流式对话 ----------
 
     /**
-     * 发送用户消息并流式接收回复。
+     * 发送用户消息并流式接收回复（T17/#18，语义不变）。
      * - [sessionId] 为 null 时新建会话，否则在既有会话上追加；
      * - [onDelta] 每收到一个增量文本回调一次（增量，非全量）；
      * - 用户消息在请求前即保存（用户已确认的本地写入）；回复只在流以 [DONE] 正常结束后保存；
-     * - 通过 [cancelGeneration] 取消：不保存部分回复，返回失败结果，用户消息保留。
+     * - 通过 [cancelGeneration] 取消：不保存部分回复，返回失败结果，用户消息保留；
+     * - 请求体只包含会话内消息，绝不携带本地事项数据。
      */
     suspend fun sendStreaming(
         sessionId: String?,
         userText: String,
         onDelta: (String) -> Unit,
+    ): Result<AiChatSession> =
+        sendInternal(sessionId, userText, onDelta, requestPrefix = emptyList(), includeHistory = true)
+
+    /**
+     * 携带授权上下文发送（T18/#19）：
+     * - 必须先经 [authorizeContext] 显式授权，未授权拒绝发送且绝不发出请求；
+     * - 授权后由 [AiContextProvider] 只读生成真实记录快照，渲染为 system 结构化文本注入请求：
+     *   回答基于真实记录、不编造；未授权类别在 prompt 中如实说明限制与本地回退；
+     * - 关闭"会话历史"类别时请求只含快照与当前消息（既有会话消息仍保存在本地）；
+     * - 快照生成失败、未配置服务等错误路径均为中文可诊断提示；
+     * - 保存、取消、多轮语义与 [sendStreaming] 完全一致。
+     */
+    suspend fun sendWithAuthorizedContext(
+        sessionId: String?,
+        userText: String,
+        onDelta: (String) -> Unit,
+    ): Result<AiChatSession> {
+        val grant = contextAuthorizer.currentGrant()
+            ?: return Result.failure(
+                IllegalStateException("尚未授权访问本地事项：请先在「授权」面板勾选要提供的上下文范围并确认"),
+            )
+        val snapshot = try {
+            contextProvider.loadSnapshot(grant)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            return Result.failure(
+                AiChatException("无法读取本地记录快照，本次未发送任何内容，请稍后重试。（${e.javaClass.simpleName}）", e),
+            )
+        }
+        val systemMessage = AiChatMessage(role = AiChatRole.SYSTEM, content = buildAiContextPrompt(grant, snapshot))
+        return sendInternal(
+            sessionId,
+            userText,
+            onDelta,
+            requestPrefix = listOf(systemMessage),
+            includeHistory = grant.contains(AiContextCategory.SESSION_HISTORY),
+        )
+    }
+
+    // ---------- 授权状态（会话级，T18/#19） ----------
+
+    /** 授权状态流：UI 观察徽标与面板用。 */
+    fun observeContextGrant(): StateFlow<AiContextGrant?> = contextAuthorizer.grant
+
+    /** 当前授权；null 表示未授权。 */
+    fun currentContextGrant(): AiContextGrant? = contextAuthorizer.currentGrant()
+
+    /** 应用授权：按类别集合整体确认（各类别已在集合中独立勾选；空集合视同撤销）。 */
+    fun authorizeContext(categories: Set<AiContextCategory>) = contextAuthorizer.grant(categories)
+
+    /** 撤销全部授权：下一次请求恢复为不含任何本地数据。 */
+    fun revokeContextAuthorization() = contextAuthorizer.revoke()
+
+    // ---------- 内部发送路径（sendStreaming / sendWithAuthorizedContext 共用） ----------
+
+    /**
+     * 共享发送实现：
+     * - [requestPrefix] 为注入请求头部的额外消息（授权上下文的 system 快照消息）；
+     * - [includeHistory] 为 false 时请求只含前缀与当前用户消息（关闭"会话历史"类别）；
+     * - 会话保存始终包含完整历史（本地记录完整），与实际请求的消息列表无关。
+     */
+    private suspend fun sendInternal(
+        sessionId: String?,
+        userText: String,
+        onDelta: (String) -> Unit,
+        requestPrefix: List<AiChatMessage>,
+        includeHistory: Boolean,
     ): Result<AiChatSession> = coroutineScope {
         val text = userText.trim()
         if (text.isEmpty()) {
@@ -131,12 +208,15 @@ class AiChatUseCases(
         // 用户消息是已确认的本地写入，请求前落盘（非业务事项写入，不涉及操作提案）
         persistSession(withUser)
 
+        // 实际请求的消息列表：前缀（如授权快照 system 消息）+ 会话历史（可关闭）+ 当前消息
+        val requestMessages = requestPrefix +
+            (if (includeHistory) withUser.messages else listOf(withUser.messages.last()))
+
         val deferred = CompletableDeferred<Result<AiChatSession>>()
         val job = launch {
             try {
                 val reply = StringBuilder()
-                // 请求体只包含会话内消息
-                client.streamChat(config, withUser.messages).collect { delta ->
+                client.streamChat(config, requestMessages).collect { delta ->
                     reply.append(delta)
                     onDelta(delta)
                 }

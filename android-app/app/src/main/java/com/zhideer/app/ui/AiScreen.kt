@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -21,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -41,6 +43,7 @@ import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiConfigInput
+import com.zhideer.app.domain.usecase.AiContextCategory
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -49,9 +52,12 @@ import java.time.format.DateTimeFormatter
 private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
 /**
- * AI 助手主界面（T17/#18），公开供根导航挂载：
+ * AI 助手主界面（T17/#18、T18/#19），公开供根导航挂载：
  * - 会话列表 + 新建会话 + 重开 + 删除；
  * - 聊天视图：多轮流式回复、发送/停止、生成中可取消；
+ * - 授权面板（#19）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签），
+ *   各类别独立勾选、整体确认授权、可随时撤销；对话页显示"已授权范围"徽标；
+ *   已授权时发送走 [AiChatUseCases.sendWithAuthorizedContext]，未授权回退普通发送（不含本地数据）；
  * - 配置对话框：API Key（掩码输入、可切换显示）、模型标识、Base URL、「测试连接」。
  * 全部文案为中文；错误提示来自用例层（已是中文可诊断文案）。
  */
@@ -60,6 +66,8 @@ private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 fun AiScreen(useCases: AiChatUseCases) {
     val scope = rememberCoroutineScope()
     val sessions by useCases.listSessions().collectAsState(initial = emptyList())
+    // 授权状态（#19）：会话级、内存保存；null = 未授权
+    val grant by useCases.observeContextGrant().collectAsState(initial = useCases.currentContextGrant())
     var chatSessionId by remember { mutableStateOf<String?>(null) } // null=列表页；""=新会话；其他=既有会话
     var currentSession by remember { mutableStateOf<AiChatSession?>(null) }
     var input by remember { mutableStateOf("") }
@@ -67,6 +75,7 @@ fun AiScreen(useCases: AiChatUseCases) {
     var streamingText by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var showConfig by remember { mutableStateOf(false) }
+    var showAuth by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -83,6 +92,7 @@ fun AiScreen(useCases: AiChatUseCases) {
                     }
                 },
                 actions = {
+                    TextButton(onClick = { showAuth = true }) { Text("授权") }
                     TextButton(onClick = { showConfig = true }) { Text("设置") }
                 },
             )
@@ -134,7 +144,13 @@ fun AiScreen(useCases: AiChatUseCases) {
                         scope.launch {
                             // 新会话传 null，由用例创建；既有会话传 id
                             val id = chatSessionId?.takeIf { it.isNotEmpty() }
-                            val result = useCases.sendStreaming(id, text) { delta -> streamingText += delta }
+                            // #19：已授权（至少一个类别）时发送携带真实记录快照；未授权回退普通发送（不含本地数据）
+                            val grantNow = useCases.currentContextGrant()
+                            val result = if (grantNow == null || grantNow.isEmpty) {
+                                useCases.sendStreaming(id, text) { delta -> streamingText += delta }
+                            } else {
+                                useCases.sendWithAuthorizedContext(id, text) { delta -> streamingText += delta }
+                            }
                             generating = false
                             result
                                 .onSuccess { session ->
@@ -156,6 +172,7 @@ fun AiScreen(useCases: AiChatUseCases) {
                         useCases.cancelGeneration()
                     }
                 },
+                grantedLabels = grant?.categories?.joinToString("、") { it.label },
                 modifier = Modifier.fillMaxSize().padding(padding),
                 error = error,
             )
@@ -166,6 +183,13 @@ fun AiScreen(useCases: AiChatUseCases) {
         AiConfigDialog(
             useCases = useCases,
             onDismiss = { showConfig = false },
+        )
+    }
+
+    if (showAuth) {
+        AiContextPanel(
+            useCases = useCases,
+            onDismiss = { showAuth = false },
         )
     }
 }
@@ -218,7 +242,7 @@ private fun SessionList(
     }
 }
 
-/** 聊天视图：消息流 + 流式生成中的部分回复 + 输入行（发送/停止）。 */
+/** 聊天视图：授权范围徽标 + 消息流 + 流式生成中的部分回复 + 输入行（发送/停止）。 */
 @Composable
 private fun ChatView(
     session: AiChatSession?,
@@ -228,6 +252,7 @@ private fun ChatView(
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    grantedLabels: String?,
     modifier: Modifier = Modifier,
     error: String?,
 ) {
@@ -239,6 +264,8 @@ private fun ChatView(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }
+        // #19：已授权范围徽标——用户随时能看到本次请求会携带哪些本地上下文
+        ContextGrantBadge(grantedLabels = grantedLabels)
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -378,7 +405,7 @@ private fun AiConfigDialog(
                 )
                 Text(
                     "API Key 仅保存在本机加密存储中，不会写入日志。" +
-                        "当前不会把本地事项、长期记忆或其他历史上传给 AI，请求只包含本会话的消息。",
+                        "除当前消息外，是否携带本地事项由顶栏「授权」面板控制：未授权时请求只包含会话内消息。",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 8.dp),
                 )
@@ -421,6 +448,123 @@ private fun AiConfigDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+/**
+ * 已授权范围徽标（#19）：已授权时显示类别列表；未授权时提示当前不携带本地数据。
+ * 点击打开授权面板的入口由顶栏「授权」提供，徽标本身只做状态展示。
+ */
+@Composable
+private fun ContextGrantBadge(grantedLabels: String?) {
+    Surface(
+        color = if (grantedLabels == null) {
+            MaterialTheme.colorScheme.surfaceVariant
+        } else {
+            MaterialTheme.colorScheme.secondaryContainer
+        },
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(
+            if (grantedLabels == null) "未授权本地数据" else "已授权：$grantedLabels",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (grantedLabels == null) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.onSecondaryContainer
+            },
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/**
+ * 授权面板（#19）：说明并勾选将随请求提供的上下文范围（用户故事 63/64）。
+ * - 各类别独立勾选、整体「保存并应用」确认；空集合应用即撤销全部授权；
+ * - 已授权时可「撤销全部授权」：撤销立即生效于下一次请求（已发出的在途请求无法撤回）；
+ * - 回收站记录与未授权类别绝不外发；关闭类别后可随时在此重新授权。
+ */
+@Composable
+private fun AiContextPanel(
+    useCases: AiChatUseCases,
+    onDismiss: () -> Unit,
+) {
+    val currentGrant = useCases.currentContextGrant()
+    var selected by remember {
+        mutableStateOf(currentGrant?.categories ?: AiContextCategory.entries.toSet())
+    }
+    val isAuthorized = currentGrant != null
+
+    fun toggle(category: AiContextCategory, checked: Boolean) {
+        selected = if (checked) selected + category else selected - category
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("上下文授权") },
+        text = {
+            Column {
+                Text(
+                    "发送消息时，除你当前这条消息外，只会随请求提供以下勾选的内容。" +
+                        "各类别可独立关闭；关闭的类别绝不外发，AI 会如实说明无法查询该类别。" +
+                        "回收站中的记录不会提供。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                AiContextCategory.entries.forEach { category ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Checkbox(
+                            checked = category in selected,
+                            onCheckedChange = { checked -> toggle(category, checked) },
+                        )
+                        Column {
+                            Text(category.label, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                category.scopeSummary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    if (isAuthorized) {
+                        "当前已授权：" + (currentGrant.categories.joinToString("、") { it.label }
+                            .ifEmpty { "（无）" })
+                    } else {
+                        "当前未授权：AI 只能看到你的消息，无法查询本地事项。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isAuthorized) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "授权为本次会话级（内存保存，退出应用后失效）；可随时撤销，撤销后请求恢复为不含本地数据。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                useCases.authorizeContext(selected) // 空集合视同撤销
+                onDismiss()
+            }) { Text(if (isAuthorized) "保存并应用" else "同意并授权") }
+        },
+        dismissButton = {
+            if (isAuthorized) {
+                TextButton(onClick = {
+                    useCases.revokeContextAuthorization()
+                    onDismiss()
+                }) { Text("撤销全部授权") }
+            } else {
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
         },
     )
 }

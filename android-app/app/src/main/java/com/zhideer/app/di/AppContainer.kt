@@ -7,6 +7,7 @@ import com.zhideer.app.data.ai.AiConfigStore
 import com.zhideer.app.data.ai.AiSessionStore
 import com.zhideer.app.data.ai.DeepSeekChatClient
 import com.zhideer.app.data.ai.EncryptedAiConfigStore
+import com.zhideer.app.data.ai.RepositoryAiContextProvider
 import com.zhideer.app.data.db.ZhiDeerDatabase
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
@@ -21,6 +22,8 @@ import com.zhideer.app.domain.repository.SubTasksRepository
 import com.zhideer.app.domain.repository.TaskOccurrenceRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiChatUseCases
+import com.zhideer.app.domain.usecase.AiContextAuthorizer
+import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.RecurrenceUseCases
@@ -154,6 +157,20 @@ class AppContainer(
 
     val aiChatClient: DeepSeekChatClient by lazy { DeepSeekChatClient() }
 
+    // —— 授权上下文（T18/#19）：纯新增装配 ——
+    // 会话级授权状态（纯内存）与真实记录快照提供者（只读，不回写业务数据）。
+    val aiContextAuthorizer: AiContextAuthorizer by lazy { AiContextAuthorizer() }
+
+    val aiContextProvider: AiContextProvider by lazy {
+        RepositoryAiContextProvider(
+            tasksRepository = tasksRepository,
+            calendarRepository = calendarRepository,
+            notesRepository = notesRepository,
+            zoneId = zoneId,
+            now = nowMillis,
+        )
+    }
+
     val aiChatUseCases: AiChatUseCases by lazy {
         AiChatUseCases(
             configStore = aiConfigStore,
@@ -161,6 +178,8 @@ class AppContainer(
             client = aiChatClient,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
+            contextAuthorizer = aiContextAuthorizer,
+            contextProvider = aiContextProvider,
         )
     }
 }
