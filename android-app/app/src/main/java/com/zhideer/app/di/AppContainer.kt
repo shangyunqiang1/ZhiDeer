@@ -116,14 +116,22 @@ class AppContainer(
         zoneId = zoneId.id,
         // #8：父待办进入回收站时子任务联动删除，保留父子关系供恢复；
         // #9：待办删除时其提醒一并停止（取消闹钟并清除记录）
+        // #12：待办删除时保留全部关联日程并解除关联（删除待办不连带删除日程）
         onTrashed = { taskId ->
             subTaskUseCases.trashForParent(taskId)
             reminderUseCases.cancelReminders(taskId)
+            taskScheduleLinkUseCases.unlinkTask(taskId)
         },
         // #9：截止编辑/延期后相对提醒随截止移动，独立时刻提醒不动
         onDueChanged = { taskId -> reminderUseCases.rescheduleForDueChange(taskId) },
         // #9：取消待办同时停止该待办自身的提醒（GLOSSARY）
         onCancelled = { taskId -> reminderUseCases.cancelReminders(taskId) },
+        // #12：完成待办同时停止该待办自身的全部提醒（issue #12 验收：完成停止不再适用的提醒）；
+        // 撤销完成不自动恢复已停止的提醒（不假装恢复，界面如实提示需重新设置）。
+        // 未来关联日程是否一并取消由界面经 CompleteTaskFutureSchedulesDialog 让用户选择，此处不隐式处置。
+        onCompleted = { taskId, completed ->
+            if (completed) reminderUseCases.cancelReminders(taskId)
+        },
         // #13：重复待办的列表过滤与完成走出现维度（每一次分别记录完成）
         occurrenceRepository = taskOccurrenceRepository,
     )
