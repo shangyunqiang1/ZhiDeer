@@ -165,6 +165,8 @@ fun MemoryScreen(useCases: MemoryUseCases) {
                 Text(
                     "“${memory.content.take(30)}${if (memory.content.length > 30) "…" else ""}”" +
                         "将被彻底删除且不可恢复；记忆不进入回收站、没有三十天保留期。" +
+                        "删除后立即从全部检索与个性化数据中清除，不会再用于任何偏好检索。" +
+                        "记忆的来源原文不受影响，如需保留请谨慎确认。" +
                         "如只是暂时不想使用，建议改为停用。",
                 )
             },
@@ -212,16 +214,27 @@ private fun MemoryRow(
         ) {
             AssistChip(onClick = onOpen, label = { Text(memory.type.label) })
             AssistChip(onClick = onOpen, label = { Text(memory.source.label) })
+            memory.sourceRef?.let { ref ->
+                AssistChip(
+                    onClick = onOpen,
+                    label = { Text(if (ref.missing) "来源已删除（${ref.type.label}）" else "来源：${ref.type.label}") },
+                )
+            }
         }
     }
     HorizontalDivider()
 }
 
-/** 状态行：确认状态 + 停用/过期提示 + 创建与更新时间。 */
+/** 状态行：确认状态 + 停用/过期提示 + 来源缺失提示 + 创建与更新时间。 */
 private fun memoryStatusLine(memory: Memory): String {
     val parts = mutableListOf<String>()
     parts.add(if (memory.confirmed) "已确认" else "未确认")
-    if (!memory.enabled) parts.add("已停用")
+    if (!memory.enabled) {
+        // #28：来源缺失导致的自动停用与用户手动停用分别如实提示
+        parts.add(
+            if (memory.sourceRef?.missing == true) "已停用（来源已删除，自动停用）" else "已停用",
+        )
+    }
     val now = System.currentTimeMillis()
     if (memory.expiresAt != null && memory.expiresAt <= now) parts.add("已过期")
     else if (memory.expiresAt != null) parts.add("有效期至 ${formatMillis(memory.expiresAt)}")
@@ -326,6 +339,18 @@ private fun MemoryDetailDialog(
                 Text(memory.content, style = MaterialTheme.typography.bodyMedium)
                 Text("类型：${memory.type.label}", style = MaterialTheme.typography.bodySmall)
                 Text("来源：${memory.source.label}", style = MaterialTheme.typography.bodySmall)
+                memory.sourceRef?.let { ref ->
+                    // #28：来源引用可追溯；来源被删除时如实标记（记忆保留，已自动停用）
+                    Text(
+                        if (ref.missing) {
+                            "来源引用：${ref.type.label}（该来源已删除，记忆已自动停用）"
+                        } else {
+                            "来源引用：${ref.type.label}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ref.missing) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
                 Text(
                     "确认状态：${if (memory.confirmed) "已确认" else "未确认"}" +
                         " · ${if (memory.enabled) "启用中" else "已停用"}",

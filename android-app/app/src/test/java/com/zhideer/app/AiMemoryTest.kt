@@ -11,6 +11,7 @@ import com.zhideer.app.domain.model.AiProposalStatus
 import com.zhideer.app.domain.model.AiConfig
 import com.zhideer.app.domain.model.CalendarEntry
 import com.zhideer.app.domain.model.Memory
+import com.zhideer.app.domain.model.MemoryRefType
 import com.zhideer.app.domain.model.MemorySource
 import com.zhideer.app.domain.model.MemoryType
 import com.zhideer.app.domain.model.Note
@@ -412,6 +413,21 @@ class AiMemoryTest {
         override suspend fun deleteMemory(id: String) {
             memories.remove(id)
         }
+
+        // 来源删除边界联动（#28）：本替身无持久化来源引用条目，联动为无操作返回 0
+        override suspend fun disableAndMarkSourceMissing(
+            sourceType: MemoryRefType,
+            sourceId: String,
+            updatedAt: Long,
+        ): Int = 0
+
+        override suspend fun clearSourceMissing(
+            sourceType: MemoryRefType,
+            sourceId: String,
+            updatedAt: Long,
+        ): Int = 0
+
+        override suspend fun deleteBySourceRef(sourceType: MemoryRefType, sourceId: String): Int = 0
     }
 
     /** 空实现替身：本测试只覆盖记忆提案与记忆检索，任何待办读写都是错误。 */
