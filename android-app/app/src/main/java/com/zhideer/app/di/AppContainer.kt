@@ -12,6 +12,7 @@ import com.zhideer.app.data.ai.RepositoryAiContextProvider
 import com.zhideer.app.data.db.ZhiDeerDatabase
 import com.zhideer.app.data.repository.CalendarRemindersRepositoryImpl
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
+import com.zhideer.app.data.repository.MemoriesRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.OccurrenceSubTaskRecordsRepositoryImpl
 import com.zhideer.app.data.repository.RemindersRepositoryImpl
@@ -20,6 +21,7 @@ import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
+import com.zhideer.app.domain.repository.MemoriesRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.OccurrenceSubTaskRecordsRepository
 import com.zhideer.app.domain.repository.RemindersRepository
@@ -32,6 +34,7 @@ import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiProposalUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
+import com.zhideer.app.domain.usecase.MemoryUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases
 import com.zhideer.app.domain.usecase.RecycleBinUseCases
@@ -188,6 +191,19 @@ class AppContainer(
 
     val noteUseCases: NoteUseCases = NoteUseCases(
         repository = notesRepository,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
+    )
+
+    // —— T26/#27 长期记忆：纯新增装配 ——
+    // 记忆是独立于便签与待办的隐私数据：独立 memories 表与独立入口，删除即彻底删除
+    // （不进回收站、不套普通事项三十天保留规则）；只有用户显式保存并确认的内容成为
+    // 长期记忆，不参与 AI 上下文快照（授权边界由 #19 体系管理，本任务零耦合）。
+    val memoriesRepository: MemoriesRepository =
+        MemoriesRepositoryImpl(database.memoryDao(), Dispatchers.IO)
+
+    val memoryUseCases: MemoryUseCases = MemoryUseCases(
+        repository = memoriesRepository,
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
     )
