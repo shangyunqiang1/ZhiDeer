@@ -12,13 +12,13 @@
 
 | Ticket | 目标 | 前置任务 | 本地状态 |
 | --- | --- | --- | --- |
-| [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) | [T01] 验证并确定工程基线 | 无 | 验证完成（2026-10-25）：构建通过+探针通过+基线=独立实现；待关闭 |
-| [#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) | [T02] 验证 OPPO 设备能力 | 无 | 验证中，未完成 |
-| [#4](https://github.com/shangyunqiang1/ZhiDeer/issues/4) | [T03] 离线管理单次待办 | #2 | 未启动 |
-| [#5](https://github.com/shangyunqiang1/ZhiDeer/issues/5) | [T04] 管理本地日历安排 | #2 | 未启动 |
-| [#6](https://github.com/shangyunqiang1/ZhiDeer/issues/6) | [T05] 记录和检索便签 | #2 | 未启动 |
-| [#7](https://github.com/shangyunqiang1/ZhiDeer/issues/7) | [T06] 为待办安排执行时段 | #4、#5 | 未启动 |
-| [#8](https://github.com/shangyunqiang1/ZhiDeer/issues/8) | [T07] 管理父待办和子任务 | #4 | 未启动 |
+| [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) | [T01] 验证并确定工程基线 | 无 | **已关闭（2026-10-25）**：构建+探针通过，基线=独立实现 |
+| [#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) | [T02] 验证 OPPO 设备能力 | 无 | 探针就绪；实机 D01-D10 最后统一验收 |
+| [#4](https://github.com/shangyunqiang1/ZhiDeer/issues/4) | [T03] 离线管理单次待办 | #2 | **已关闭（2026-10-25）**：a217f3b，7 测试绿+模拟器冒烟 |
+| [#5](https://github.com/shangyunqiang1/ZhiDeer/issues/5) | [T04] 管理本地日历安排 | #2 | **已关闭（2026-10-25）**：01224d4，10 测试绿+月视图验证 |
+| [#6](https://github.com/shangyunqiang1/ZhiDeer/issues/6) | [T05] 记录和检索便签 | #2 | **已关闭（2026-10-25）**：eb4057e，9 测试绿 |
+| [#7](https://github.com/shangyunqiang1/ZhiDeer/issues/7) | [T06] 为待办安排执行时段 | #4、#5 | 实现中（后台子代理） |
+| [#8](https://github.com/shangyunqiang1/ZhiDeer/issues/8) | [T07] 管理父待办和子任务 | #4 | 实现中（后台子代理） |
 | [#9](https://github.com/shangyunqiang1/ZhiDeer/issues/9) | [T08] 为待办设置本地提醒 | #3、#4 | 未启动 |
 | [#10](https://github.com/shangyunqiang1/ZhiDeer/issues/10) | [T09] 为日程设置并调整提醒 | #5、#9 | 未启动 |
 | [#11](https://github.com/shangyunqiang1/ZhiDeer/issues/11) | [T10] 恢复设备变化后的提醒 | #9 | 未启动 |
