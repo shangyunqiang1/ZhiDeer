@@ -588,6 +588,24 @@ class AdvisorUseCasesTest {
         override suspend fun deleteMemory(id: String) {
             memories.remove(id)
         }
+
+        // 来源删除边界（T27/#28）：参谋建议不触碰来源联动，此处空实现仅满足接口
+        override suspend fun disableAndMarkSourceMissing(
+            sourceType: com.zhideer.app.domain.model.MemoryRefType,
+            sourceId: String,
+            updatedAt: Long,
+        ): Int = 0
+
+        override suspend fun clearSourceMissing(
+            sourceType: com.zhideer.app.domain.model.MemoryRefType,
+            sourceId: String,
+            updatedAt: Long,
+        ): Int = 0
+
+        override suspend fun deleteBySourceRef(
+            sourceType: com.zhideer.app.domain.model.MemoryRefType,
+            sourceId: String,
+        ): Int = 0
     }
 
     /** 空实现替身：参谋建议绝不读取或写入便签。 */
