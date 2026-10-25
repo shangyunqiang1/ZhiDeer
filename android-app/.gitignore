@@ -1,4 +1,5 @@
 build/
 .gradle/
+.kotlin/
 local.properties
 app/schemas/*/1.json
