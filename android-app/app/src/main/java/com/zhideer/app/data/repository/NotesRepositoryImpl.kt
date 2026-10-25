@@ -35,4 +35,19 @@ class NotesRepositoryImpl(
     override suspend fun trashNote(id: String, trashedAtMillis: Long) = withContext(ioDispatcher) {
         noteDao.trash(id, trashedAtMillis)
     }
+
+    override fun observeTrashedNotes(): Flow<List<Note>> =
+        noteDao.observeTrashed()
+            .map { list -> list.map { it.toModel() } }
+            .flowOn(ioDispatcher)
+
+    override suspend fun listTrashedNotes(): List<Note> = withContext(ioDispatcher) {
+        noteDao.listTrashed().map { it.toModel() }
+    }
+
+    /** 彻底删除：先清清单项再删便签行，不依赖外键级联，保证级联结果确定。 */
+    override suspend fun purgeNote(id: String) = withContext(ioDispatcher) {
+        noteDao.deleteItemsForNote(id)
+        noteDao.deleteById(id)
+    }
 }

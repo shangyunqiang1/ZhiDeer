@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tab(val label: String) { TASKS("待办"), CALENDAR("日程"), NOTES("便签"), AI("AI") }
+private enum class Tab(val label: String) { TASKS("待办"), CALENDAR("日程"), NOTES("便签"), AI("AI"), BIN("回收站") }
 
 @Composable
 private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
@@ -76,6 +76,7 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                 )
                 Tab.NOTES -> NotesScreen(useCases = container.noteUseCases)
                 Tab.AI -> com.zhideer.app.ui.AiScreen(useCases = container.aiChatUseCases)
+                Tab.BIN -> com.zhideer.app.ui.RecycleBinScreen(useCases = container.recycleBinUseCases)
             }
         }
     }

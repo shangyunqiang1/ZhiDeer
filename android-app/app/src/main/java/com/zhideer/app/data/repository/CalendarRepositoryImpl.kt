@@ -37,4 +37,17 @@ class CalendarRepositoryImpl(
     override suspend fun trashEntry(id: String, trashedAtMillis: Long) = withContext(ioDispatcher) {
         calendarEntryDao.trash(id, trashedAtMillis)
     }
+
+    override fun observeTrashedEntries(): Flow<List<CalendarEntry>> =
+        calendarEntryDao.observeTrashed()
+            .map { list -> list.map { it.toModel() } }
+            .flowOn(ioDispatcher)
+
+    override suspend fun listTrashedEntries(): List<CalendarEntry> = withContext(ioDispatcher) {
+        calendarEntryDao.listTrashed().map { it.toModel() }
+    }
+
+    override suspend fun purgeEntry(id: String) = withContext(ioDispatcher) {
+        calendarEntryDao.deleteById(id)
+    }
 }

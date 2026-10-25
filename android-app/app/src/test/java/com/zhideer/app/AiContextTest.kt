@@ -512,6 +512,14 @@ private class FakeTasksRepository : TasksRepository {
         val index = tasks.indexOfFirst { it.id == id }
         if (index >= 0) tasks[index] = tasks[index].copy(trashedAt = trashedAtMillis)
     }
+
+    override fun observeTrashedTasks(): Flow<List<TodoTask>> = flow { emit(tasks.filter { it.trashedAt != null }) }
+
+    override suspend fun listTrashedTasks(): List<TodoTask> = tasks.filter { it.trashedAt != null }
+
+    override suspend fun purgeTask(id: String) {
+        tasks.removeAll { it.id == id }
+    }
 }
 
 private class FakeCalendarRepository : CalendarRepository {
@@ -537,6 +545,14 @@ private class FakeCalendarRepository : CalendarRepository {
         val index = entries.indexOfFirst { it.id == id }
         if (index >= 0) entries[index] = entries[index].copy(trashedAt = trashedAtMillis)
     }
+
+    override fun observeTrashedEntries(): Flow<List<CalendarEntry>> = flow { emit(entries.filter { it.trashedAt != null }) }
+
+    override suspend fun listTrashedEntries(): List<CalendarEntry> = entries.filter { it.trashedAt != null }
+
+    override suspend fun purgeEntry(id: String) {
+        entries.removeAll { it.id == id }
+    }
 }
 
 private class FakeNotesRepository : NotesRepository {
@@ -558,5 +574,13 @@ private class FakeNotesRepository : NotesRepository {
     override suspend fun trashNote(id: String, trashedAtMillis: Long) {
         val index = notes.indexOfFirst { it.id == id }
         if (index >= 0) notes[index] = notes[index].copy(trashedAt = trashedAtMillis)
+    }
+
+    override fun observeTrashedNotes(): Flow<List<Note>> = flow { emit(notes.filter { it.trashedAt != null }) }
+
+    override suspend fun listTrashedNotes(): List<Note> = notes.filter { it.trashedAt != null }
+
+    override suspend fun purgeNote(id: String) {
+        notes.removeAll { it.id == id }
     }
 }

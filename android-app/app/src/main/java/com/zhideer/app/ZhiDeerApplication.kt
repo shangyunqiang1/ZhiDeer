@@ -11,5 +11,7 @@ class ZhiDeerApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // T16/#17：三十天到期清理的应用启动懒执行（幂等；清理逻辑与测试见 RecycleBinUseCases）
+        container.purgeExpiredOnStartup()
     }
 }
