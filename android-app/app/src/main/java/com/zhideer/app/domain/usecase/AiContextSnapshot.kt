@@ -33,6 +33,15 @@ data class AiContextNoteRecord(
 )
 
 /**
+ * 快照中的一条长期记忆记录（T28/#29 纯新增；GLOSSARY：长期记忆）。
+ * [content] 为记忆原文（用户确认保存的原话，不篡改不扩写）；[typeLabel] 为偏好/事实中文标签。
+ */
+data class AiContextMemoryRecord(
+    val content: String,
+    val typeLabel: String,
+)
+
+/**
  * 一次请求用的真实记录快照。各列表只含已授权类别的记录；
  * 已授权但无记录时对应列表为空（prompt 中如实说明"暂无记录"，不编造）。
  */
@@ -41,6 +50,8 @@ data class AiContextSnapshot(
     val tasks: List<AiContextTaskRecord> = emptyList(),
     val schedule: List<AiContextScheduleRecord> = emptyList(),
     val notes: List<AiContextNoteRecord> = emptyList(),
+    // T28/#29 纯新增：记忆段（仅活动记忆，上限少量条数，原文不篡改）
+    val memories: List<AiContextMemoryRecord> = emptyList(),
 )
 
 /** 上下文快照提供者：按授权类别只读生成快照；未授权类别绝不读取。 */
@@ -106,8 +117,23 @@ internal fun buildAiContextPrompt(grant: AiContextGrant, snapshot: AiContextSnap
     }
 
     appendLine()
+    if (grant.contains(AiContextCategory.MEMORY)) {
+        appendLine("【长期记忆】（${AiContextCategory.MEMORY.scopeSummary}）")
+        if (snapshot.memories.isEmpty()) {
+            appendLine("暂无记忆记录。")
+        } else {
+            appendLine("以下是用户此前明确要求记住并确认保存的长期记忆，回答涉及其偏好的问题时应遵守：")
+            snapshot.memories.forEach { memory ->
+                appendLine("- [${memory.typeLabel}] ${memory.content}")
+            }
+        }
+    } else {
+        appendLine("【长期记忆】用户未授权该类别，本次未提供记忆记录。")
+    }
+
+    appendLine()
     appendLine("【回答规则】")
-    appendLine("1. 以上快照是本次请求可用的全部真实记录：快照中不存在的待办、日程或便签一律不存在，绝不编造任何记录、日期或结果。")
+    appendLine("1. 以上快照是本次请求可用的全部真实记录：快照中不存在的待办、日程、便签或记忆一律不存在，绝不编造任何记录、日期或结果。")
     appendLine("2. 用户询问了未授权类别时，如实说明当前无法查询该类别，建议在 AI 界面的「授权」面板中开启对应类别，或前往本地待办、日历、便签页面直接查看。")
     appendLine("3. 已授权类别没有记录时，如实说明当前没有相关记录，不要假设或补全。")
 }

@@ -11,6 +11,7 @@ import com.zhideer.app.domain.model.AiProposalOp
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalSendReply
 import com.zhideer.app.domain.model.AiProposalStatus
+import com.zhideer.app.domain.model.MemorySource
 import com.zhideer.app.domain.model.Reminder
 import com.zhideer.app.domain.model.TaskPriority
 import kotlinx.coroutines.CancellationException
@@ -32,6 +33,8 @@ import java.time.ZoneId
  * - 新增：待办经 [TaskUseCases.create]、便签经 [NoteUseCases.create]；
  *   日程（T20/#21）先经 [CalendarUseCases.create] 创建，附属提醒一并经
  *   [CalendarReminderUseCases.setReminders] 设置（含去重；非法提醒在确认前已整批拒绝）；
+ *   长期记忆（T28/#29）经 [MemoryUseCases.create] 保存，来源标记聊天确认（可追溯）、
+ *   写入即已确认；确认前记忆表绝无写入（GLOSSARY：操作提案）；
  * - 修改（T21/#22）：待办经 [TaskUseCases.update]/[TaskUseCases.complete]、便签经 [NoteUseCases.update]、
  *   日程经 [CalendarUseCases.update]（时间变化自动联动相对提醒重算）；
  * - 删除（T21/#22）：待办取消经 [TaskUseCases.cancel]（GLOSSARY：取消待办保留记录并停止提醒，不是删除）；
@@ -47,8 +50,8 @@ import java.time.ZoneId
  * - 匹配不到或候选过多：不落提案，中文提示并追问，绝不猜测、绝不编造；
  * - 执行时重读当前记录，updatedAt 与快照不一致（确认前被手动修改）则拒绝覆盖该项并如实回执。
  *
- * 授权边界：新增提案路径（[sendAndIngest] 对 CREATE 条目）不读取任何本地业务数据（只写不读），
- * 不要求上下文授权；修改/删除条目的目标匹配需要读取对应类别，授权门只对它们生效。
+ * 授权边界：新增提案路径（[sendAndIngest] 对 CREATE 条目，含 T28/#29 记忆提案）不读取任何本地业务数据
+ * （只写不读），不要求上下文授权；修改/删除条目的目标匹配需要读取对应类别，授权门只对它们生效。
  *
  * 幂等：EXECUTED 后再次确认只返回既有结果；重复忽略幂等成功——重复确认或重试绝不重复执行。
  */
@@ -62,6 +65,9 @@ class AiProposalUseCases(
     private val calendarReminderUseCases: CalendarReminderUseCases,
     // T21/#22 纯新增：修改/删除提案的目标定位（授权门在本用例，匹配器只读仓库）
     private val targetMatcher: AiProposalTargetMatcher,
+    // T28/#29 纯新增：长期记忆真实入口（仅确认执行分支调用；可空默认值保持既有构造零回归，
+    // 生产装配必须传入，缺省时记忆提案确认返回中文错误、绝不静默丢失）
+    private val memoryUseCases: MemoryUseCases? = null,
     private val idGen: () -> String,
     private val now: () -> Long,
     // 创建时区（提案截止/日程起止换算基准）；公开供提案卡片按同一时区渲染可读时间
@@ -172,6 +178,9 @@ class AiProposalUseCases(
         AiProposalKind.TASK -> AiContextCategory.TASKS
         AiProposalKind.NOTE -> AiContextCategory.NOTES
         AiProposalKind.SCHEDULE -> AiContextCategory.SCHEDULE
+        // T28/#29：记忆条目只支持新增（CREATE），修改/删除记忆不走目标定位；
+        // 若未来开放修改/删除记忆，其目标读取应经此记忆授权门。
+        AiProposalKind.MEMORY -> AiContextCategory.MEMORY
     }
 
     /** 匹配失败/未授权等中文追问写入会话（留痕），写入失败不影响发送结果。 */
@@ -327,6 +336,7 @@ class AiProposalUseCases(
         val taskIds = mutableListOf<String>()
         val noteIds = mutableListOf<String>()
         val scheduleIds = mutableListOf<String>()
+        val memoryIds = mutableListOf<String>()
         val okLines = mutableListOf<String>()
         val failLines = mutableListOf<String>()
         claimed.items.forEachIndexed { index, item ->
@@ -340,6 +350,8 @@ class AiProposalUseCases(
                         AiProposalKind.SCHEDULE -> createScheduleWithReminders(item).map { (id, suffix) ->
                             CreatedRecord(id, suffix)
                         }
+                        // T28/#29：记忆提案确认后经 MemoryUseCases 真实入口保存（来源 CHAT，写入即已确认）
+                        AiProposalKind.MEMORY -> createChatMemory(item)
                     }
                     // T21/#22：修改与删除经真实用例入口执行
                     AiProposalOp.MODIFY -> executeModify(item)
@@ -365,6 +377,10 @@ class AiProposalUseCases(
                             AiProposalKind.SCHEDULE -> {
                                 scheduleIds += created.id
                                 okLines += "$label 日程「${item.title}」已创建（记录 id=${created.id}）${created.detail.orEmpty()}"
+                            }
+                            AiProposalKind.MEMORY -> {
+                                memoryIds += created.id
+                                okLines += "$label 记忆「${item.content}」已创建（来源：聊天确认；记录 id=${created.id}）"
                             }
                         }
                         AiProposalOp.MODIFY -> {
@@ -394,6 +410,7 @@ class AiProposalUseCases(
                 createdTaskIds = taskIds,
                 createdNoteIds = noteIds,
                 createdScheduleIds = scheduleIds,
+                createdMemoryIds = memoryIds,
                 resultMessage = resultMessage,
             )
         } ?: return Result.failure(IllegalStateException("操作提案状态已变化，请刷新后重试"))
@@ -426,6 +443,8 @@ class AiProposalUseCases(
             AiProposalKind.TASK -> modifyTask(targetId, changes)
             AiProposalKind.NOTE -> modifyNote(targetId, changes)
             AiProposalKind.SCHEDULE -> modifySchedule(targetId, changes)
+            // T28/#29：记忆条目只支持新增提案，不参与修改执行（解析层已拒绝，穷举防御分支）
+            AiProposalKind.MEMORY -> Result.failure(IllegalStateException("记忆不支持修改提案，可在记忆页面编辑"))
         }
     }
 
@@ -517,7 +536,20 @@ class AiProposalUseCases(
             }
             AiProposalKind.NOTE -> noteUseCases.trash(targetId).map { CreatedRecord(targetId) }
             AiProposalKind.SCHEDULE -> calendarUseCases.trash(targetId).map { CreatedRecord(targetId) }
+            // T28/#29：记忆条目只支持新增提案，不参与删除执行（解析层已拒绝，穷举防御分支）
+            AiProposalKind.MEMORY -> Result.failure(IllegalStateException("记忆不支持删除提案，可在记忆页面删除"))
         }
+    }
+
+    /**
+     * 保存记忆条目（T28/#29）：确认执行分支经 [MemoryUseCases.create] 真实入口写入，
+     * 来源标记为聊天确认（MemorySource.CHAT，可追溯）、写入即已确认；
+     * 记忆写入提案不需要读取授权（只写不读）。入口未配置（装配缺省）时中文报错，绝不静默丢失。
+     */
+    private suspend fun createChatMemory(item: AiProposalItem): Result<CreatedRecord> {
+        val memories = memoryUseCases
+            ?: return Result.failure(IllegalStateException("记忆保存入口未配置，无法保存该条记忆"))
+        return memories.create(item.toMemoryInput(), MemorySource.CHAT).map { CreatedRecord(it.id) }
     }
 
     /**

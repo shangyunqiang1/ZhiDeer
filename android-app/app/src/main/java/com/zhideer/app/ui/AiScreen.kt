@@ -53,6 +53,7 @@ import com.zhideer.app.domain.usecase.AiConfigInput
 import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.AiProposalUseCases
 import com.zhideer.app.domain.usecase.kindCn
+import com.zhideer.app.domain.usecase.memoryTypeCn
 import com.zhideer.app.domain.usecase.proposalChangePreviewLines
 import com.zhideer.app.domain.usecase.proposalDeleteActionText
 import com.zhideer.app.domain.usecase.proposalDueText
@@ -70,15 +71,17 @@ private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
  * AI 助手主界面（T17/#18、T18/#19、T19/#20、T20/#21、T21/#22），公开供根导航挂载：
  * - 会话列表 + 新建会话 + 重开 + 删除；
  * - 聊天视图：多轮流式回复、发送/停止、生成中可取消；
- * - 创建模式（#20/#21/#22）：开启后发送走提案路径——AI 起草待办/便签/日程的新增、修改与删除操作提案，
+ * - 创建模式（#20/#21/#22/#29）：开启后发送走提案路径——AI 起草待办/便签/日程的新增、修改与删除，
+ *   以及「记住」类长期记忆的操作提案（T28/#29：确认前绝不写入记忆表，确认后以聊天确认来源保存），
  *   提案以卡片呈现在对话流中（完整字段预览 + 「确认创建/确认执行」「忽略」与逐项「移除」），
  *   日程卡片显示按创建时区换算的时间范围（跨日明确显示）、地点/分类/备注与提醒摘要（无提醒明确标注）；
  *   修改条目逐字段展示「旧值 → 新值」并显示选定目标快照；删除条目明确取消/删除语义
  *   （GLOSSARY：取消待办保留记录并停止提醒，不是删除）；修改/删除需读取本地数据定位目标，
  *   未授权对应类别时提示先授权；多候选时列出候选供点选（点选哪条就是哪条，未点选不可确认），
  *   匹配不到时由 AI 追问；确认前绝不写入业务数据，确认后回执含记录标识写回对话；
- * - 授权面板（#19）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签），
- *   各类别独立勾选、整体确认授权、可随时撤销；对话页显示"已授权范围"徽标；
+ * - 授权面板（#19，T28/#29 扩展记忆）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签/记忆），
+ *   各类别独立勾选、整体确认授权、可随时撤销；记忆默认关闭，勾选后仅活动记忆随请求外发；
+ *   对话页显示"已授权范围"徽标；
  *   已授权时普通发送走 [AiChatUseCases.sendWithAuthorizedContext]，未授权回退普通发送（不含本地数据）；
  *   新增提案只写不读，不需要授权（#20）；修改/删除提案的目标定位需要对应类别授权（#22）；
  * - 配置对话框：API Key（掩码输入、可切换显示）、模型标识、Base URL、「测试连接」。
@@ -593,8 +596,10 @@ private fun ContextGrantBadge(grantedLabels: String?) {
 }
 
 /**
- * 授权面板（#19）：说明并勾选将随请求提供的上下文范围（用户故事 63/64）。
+ * 授权面板（#19，T28/#29 扩展记忆类别）：说明并勾选将随请求提供的上下文范围（用户故事 63/64）。
  * - 各类别独立勾选、整体「保存并应用」确认；空集合应用即撤销全部授权；
+ * - 长期记忆默认关闭：记忆是独立隐私数据，仅在用户主动勾选后，确认保存的活动记忆
+ *   （上限少量条数、原文不篡改）才随请求外发；
  * - 已授权时可「撤销全部授权」：撤销立即生效于下一次请求（已发出的在途请求无法撤回）；
  * - 回收站记录与未授权类别绝不外发；关闭类别后可随时在此重新授权。
  */
@@ -605,7 +610,11 @@ private fun AiContextPanel(
 ) {
     val currentGrant = useCases.currentContextGrant()
     var selected by remember {
-        mutableStateOf(currentGrant?.categories ?: AiContextCategory.entries.toSet())
+        mutableStateOf(
+            currentGrant?.categories
+                // 记忆默认关闭：未授权过时记忆类别不预选（其余类别维持原有默认全选）
+                ?: (AiContextCategory.entries.toSet() - AiContextCategory.MEMORY),
+        )
     }
     val isAuthorized = currentGrant != null
 
@@ -859,6 +868,11 @@ private fun ProposalItemRow(
                         if (item.category.isNotBlank()) add("分类：${item.category}")
                         if (item.note.isNotBlank()) add("备注：${item.note}")
                         add("提醒：" + (proposalReminderText(item, zoneId) ?: "无"))
+                    }
+                    // T28/#29 记忆：类型 + 确认后保存为聊天确认来源的长期记忆（原文原样保存）
+                    AiProposalKind.MEMORY -> {
+                        add("类型：${memoryTypeCn(item.memoryType)}")
+                        if (item.content.isNotBlank()) add("内容：${item.content}")
                     }
                 }
                 // T21/#22：修改逐字段「旧值 → 新值」；删除明确取消/删除语义与去向

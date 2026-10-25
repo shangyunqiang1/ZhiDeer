@@ -8,9 +8,13 @@ import kotlinx.serialization.Serializable
  * 提案本身不表示事项已保存或修改成功。提案有意不进 Room（数据库零改动），存 DataStore JSON。
  */
 
-/** 提案条目类型：待办、便签或日程（T20/#21 扩展日程）。 */
+/**
+ * 提案条目类型：待办、便签、日程或长期记忆（T20/#21 扩展日程，T28/#29 扩展记忆）。
+ * [MEMORY] 只支持新增（CREATE）：记忆的停用/启用与删除在记忆页面管理，
+ * 聊天总结绝不自动升级为长期记忆（GLOSSARY：聊天历史本身不等于长期记忆）。
+ */
 @Serializable
-enum class AiProposalKind { TASK, NOTE, SCHEDULE }
+enum class AiProposalKind { TASK, NOTE, SCHEDULE, MEMORY }
 
 /**
  * 提案操作类型（T21/#22 纯新增）：新增、修改或删除既有记录。
@@ -149,12 +153,16 @@ data class AiProposalItem(
     val candidates: List<AiProposalTargetRecord> = emptyList(),
     val targetRecordId: String? = null,
     val targetRecord: AiProposalTargetRecord? = null,
+    // T28/#29 记忆条目字段（仅 MEMORY 条目使用）：类型为偏好或事实，解析层校验；
+    // 记忆原文存 [content]（用户原话不改写），[title] 为展示用摘要（原文截断）。
+    val memoryType: String = "FACT",
 )
 
 /**
  * 一次对话产生的操作提案：唯一 [id] + 状态机 + 全部条目。
  * [sessionId] 关联产生它的聊天会话（新会话时由发送路径生成后回填）；
- * [createdTaskIds]/[createdNoteIds]/[createdScheduleIds]（T20/#21）为确认后经真实用例入口创建的记录标识；
+ * [createdTaskIds]/[createdNoteIds]/[createdScheduleIds]（T20/#21）与 [createdMemoryIds]（T28/#29）
+ * 为确认后经真实用例入口创建的记录标识；
  * [resultMessage] 为执行结果的中文回执（含已创建记录标识；部分失败时如实说明）。
  */
 @Serializable
@@ -167,6 +175,7 @@ data class AiProposal(
     val createdTaskIds: List<String> = emptyList(),
     val createdNoteIds: List<String> = emptyList(),
     val createdScheduleIds: List<String> = emptyList(),
+    val createdMemoryIds: List<String> = emptyList(),
     val resultMessage: String? = null,
 )
 

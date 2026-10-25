@@ -20,6 +20,13 @@ enum class AiContextCategory(val label: String, val scopeSummary: String) {
 
     /** 最近保存的便签（GLOSSARY：便签；不含回收站）。 */
     NOTES("便签", "最近保存的便签（不含回收站）"),
+
+    /**
+     * 已确认保存的长期记忆（T28/#29 纯新增；GLOSSARY：长期记忆）。
+     * 记忆是独立隐私数据，默认关闭：仅在用户主动勾选后，最近更新的活动记忆
+     * （已确认、未停用、未过期，上限少量条数）才随请求外发。
+     */
+    MEMORY("记忆", "已确认保存的长期记忆偏好与事实"),
 }
 
 /**

@@ -71,6 +71,8 @@ class AiProposalTargetMatcher(
         AiProposalKind.TASK -> tasksRepository.getTask(recordId)?.takeIf { it.trashedAt == null }?.toTargetRecord()
         AiProposalKind.NOTE -> notesRepository.getNote(recordId)?.takeIf { it.trashedAt == null }?.toTargetRecord()
         AiProposalKind.SCHEDULE -> calendarRepository.getEntry(recordId)?.takeIf { it.trashedAt == null }?.toTargetRecord()
+        // T28/#29：记忆条目只支持新增提案，不参与目标定位（穷举防御分支，实际不可达）
+        AiProposalKind.MEMORY -> null
     }
 
     /** 正常记录池：排除回收站；待办不按状态过滤（完成/取消的记录也可被修改或删除）。 */
@@ -81,6 +83,8 @@ class AiProposalTargetMatcher(
             notesRepository.observeNotes().first().filter { it.trashedAt == null }.map { it.toTargetRecord() }
         AiProposalKind.SCHEDULE ->
             calendarRepository.observeEntries().first().filter { it.trashedAt == null }.map { it.toTargetRecord() }
+        // T28/#29：记忆条目只支持新增提案，不参与目标定位（穷举防御分支，实际不可达）
+        AiProposalKind.MEMORY -> emptyList()
     }
 
     private fun com.zhideer.app.domain.model.TodoTask.toTargetRecord() = AiProposalTargetRecord(
