@@ -16,25 +16,45 @@ import com.zhideer.app.data.db.SubTaskEntity
 import com.zhideer.app.data.db.TaskEntity
 import com.zhideer.app.data.db.TaskOccurrenceEntity
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.data.repository.RemindersRepositoryImpl
+import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.model.AiChatMessage
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
 import com.zhideer.app.domain.usecase.BackupUseCases
+import com.zhideer.app.domain.usecase.ReminderUseCases
+import com.zhideer.app.platform.AlarmScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.security.SecureRandom
 import java.time.ZoneId
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * T31/#32 验收测试：手动加密备份导出。
@@ -85,6 +105,8 @@ class BackupUseCasesTest {
             database = db,
             sessionHistory = { sessionStore.load() },
             now = { clock.last() },
+            // 恢复出口与生产装配（AppContainer）一致：Room 事务成功后还原会话历史
+            sessionRestorer = { sessions -> sessionStore.save(sessions) },
         )
     }
 
@@ -409,6 +431,399 @@ class BackupUseCasesTest {
         assertTrue("失败提示应指出会话历史：$message", message.contains("会话"))
         assertFalse("失败时不应生成备份文件", target.exists())
     }
+
+    // ==================== T32/#33 核对备份并整库恢复 ====================
+
+    @Test
+    fun 核对备份返回可读摘要且不改动当前数据() = runBlocking {
+        seedSampleData()
+        sessionStore.save(listOf(seedSession()))
+        reopen()
+        val target = File(exportDir, "inspect.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        // 核对前当前库又发生变化：新增一行待办（核对必须是只读操作）
+        db.taskDao().upsert(taskEntity("task-new", "核对前新增"))
+        reopen()
+
+        val inspection = useCases.inspectBackup(target, password).getOrThrow()
+
+        assertEquals(BackupUseCases.FORMAT_VERSION, inspection.formatVersion)
+        assertEquals("备份库版本应为当前 schema 版本", currentDbVersion(), inspection.dbVersion)
+        assertEquals(clock.last(), inspection.exportedAt)
+        assertEquals("摘要应展示备份时点各表计数", 2, inspection.tableCounts.getValue("tasks"))
+        assertEquals(1, inspection.tableCounts.getValue("memories"))
+        assertEquals(1, inspection.aiSessionCount)
+        assertTrue("同版本备份应兼容", inspection.compatible)
+        assertNull("兼容时不应有拒绝原因", inspection.incompatibilityReason)
+        assertTrue("清单应与实际内容一致", inspection.integrityOk)
+        // 核对是只读操作：当前库新增行仍在、计数为 3 而非备份的 2
+        assertEquals("核对前新增", db.taskDao().get("task-new")?.title)
+    }
+
+    @Test
+    fun 整库恢复覆盖当前数据回到备份原样() = runBlocking {
+        seedSampleData()
+        sessionStore.save(listOf(seedSession()))
+        reopen()
+        val target = File(exportDir, "restore-full.zdbak")
+        val exported = useCases.exportAll(password, target).getOrThrow()
+
+        // 恢复前当前数据被大幅改动：同 id 篡改、新增行、删除便签、会话替换
+        db.taskDao().upsert(taskEntity("task-2", "被篡改的标题"))
+        db.taskDao().upsert(taskEntity("task-new", "恢复前新增"))
+        db.noteDao().deleteById("note-1")
+        sessionStore.save(emptyList())
+        reopen()
+        // 本机配置特征串：API Key 与配置不属于备份范围，恢复不得触碰
+        context.getSharedPreferences("ai_chat_config", Context.MODE_PRIVATE).edit()
+            .putString("api_key", "sk-RESTORE-KEY-999")
+            .apply()
+
+        val summary = useCases.restoreAll(target, password).getOrThrow()
+
+        // 覆盖式整库替换：篡改与新增全部消失，回到备份时点（行级核对）
+        assertEquals("对芒果过敏的提醒", db.taskDao().get("task-1")?.title)
+        assertEquals("买牛奶", db.taskDao().get("task-2")?.title)
+        assertNull("恢复前新增的行应被清除", db.taskDao().get("task-new"))
+        assertEquals("查看配料表", db.subTaskDao().get("sub-1")?.title)
+        assertEquals("医院复诊", db.calendarEntryDao().get("entry-1")?.title)
+        val note = db.noteDao().get("note-1")
+        assertEquals("购物清单", note?.note?.title)
+        assertEquals("删除的便签应随整库恢复回归", 2, note?.items?.size)
+        assertEquals("牛奶", note?.items?.firstOrNull { it.id == "item-1" }?.text)
+        assertEquals("长期记忆应恢复原文", "我对芒果过敏，推荐食谱时请避开", db.memoryDao().get("memory-1")?.content)
+
+        // 摘要与备份清单一致
+        assertEquals(exported.tableCounts, summary.tableCounts)
+        assertEquals("恢复摘要的库版本应与导出一致", exported.dbVersion, summary.dbVersion)
+        assertEquals(clock.last(), summary.exportedAt)
+        assertEquals(1, summary.aiSessionCount)
+
+        // AI 会话历史还原为备份时点内容
+        val sessions = sessionStore.load()
+        assertEquals(1, sessions.size)
+        assertEquals("帮我安排明天买牛奶", sessions.single().title)
+        assertEquals("已为你创建待办「买牛奶」", sessions.single().messages.last().content)
+
+        // 本机配置与 API Key 不受恢复影响
+        assertEquals(
+            "sk-RESTORE-KEY-999",
+            context.getSharedPreferences("ai_chat_config", Context.MODE_PRIVATE)
+                .getString("api_key", null),
+        )
+    }
+
+    @Test
+    fun 恢复后全部提醒暂停且摘要展示清单() = runBlocking {
+        seedSampleData()
+        reopen()
+        val target = File(exportDir, "restore-pause.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        reopen()
+
+        val summary = useCases.restoreAll(target, password).getOrThrow()
+
+        // 恢复的提醒一律先暂停：不立即重建任何未来提醒，等待用户确认
+        val taskReminder = db.reminderDao().get("rem-1")
+        assertNotNull(taskReminder)
+        assertFalse("恢复的待办提醒应暂停", taskReminder!!.enabled)
+        val calendarReminder = db.calendarReminderDao().get("calrem-1")
+        assertNotNull(calendarReminder)
+        assertFalse("恢复的日程提醒应暂停", calendarReminder!!.enabled)
+
+        // 摘要展示暂停清单（可理解的来源名称）
+        assertEquals(1, summary.pausedReminderCount)
+        assertEquals(1, summary.pausedCalendarReminderCount)
+        assertTrue(
+            "清单应含待办标题：${summary.pausedReminderSources}",
+            summary.pausedReminderSources.contains("对芒果过敏的提醒"),
+        )
+        assertTrue(
+            "清单应含日程标题：${summary.pausedCalendarReminderSources}",
+            summary.pausedCalendarReminderSources.contains("医院复诊"),
+        )
+    }
+
+    @Test
+    fun 恢复的提醒经既有入口确认后可重新启用() = runBlocking {
+        seedSampleData()
+        // 相对提醒需要具体时刻截止才能换算触发时间：给 task-1 设置未来时刻截止
+        db.taskDao().upsert(taskEntity("task-1", "对芒果过敏的提醒").copy(dueAtMillis = clock.last() + 3_600_000))
+        reopen()
+        val target = File(exportDir, "restore-enable.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        reopen()
+
+        val summary = useCases.restoreAll(target, password).getOrThrow()
+        assertFalse("恢复后应先暂停", summary.pausedReminderCount == 0)
+
+        val scheduler = RecordingScheduler()
+        val reminders = ReminderUseCases(
+            repository = RemindersRepositoryImpl(db.reminderDao(), Dispatchers.IO),
+            tasksRepository = TasksRepositoryImpl(db.taskDao(), Dispatchers.IO),
+            scheduler = scheduler,
+            idGen = { "gen-id" },
+            now = { clock.last() },
+        )
+        // 用户经既有提醒入口逐项确认：按既有权限/未就绪逻辑重建未来提醒
+        val enabled = reminders.setEnabled("rem-1", true).getOrThrow()
+        assertTrue(enabled.enabled)
+        assertTrue(
+            "确认启用后应重新调度：${scheduler.scheduled}",
+            scheduler.scheduled.contains("rem-1"),
+        )
+    }
+
+    @Test
+    fun 错误口令恢复失败且当前数据完好() = runBlocking {
+        seedSampleData()
+        reopen()
+        val target = File(exportDir, "restore-wrongpw.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        // 恢复前当前数据被改动（有效数据）
+        db.taskDao().upsert(taskEntity("task-2", "当前有效数据"))
+        sessionStore.save(listOf(seedSession().copy(id = "session-now", title = "当前会话")))
+        reopen()
+
+        val result = useCases.restoreAll(target, "错误口令789")
+
+        assertTrue("错误口令必须失败", result.isFailure)
+        val message = result.exceptionOrNull()?.message.orEmpty()
+        assertTrue("失败提示应为中文口令错误：$message", message.contains("口令错误"))
+        // 当前有效数据原样保留
+        assertEquals("当前有效数据", db.taskDao().get("task-2")?.title)
+        assertEquals("对芒果过敏的提醒", db.taskDao().get("task-1")?.title)
+        assertEquals("会话历史未被改动", "当前会话", sessionStore.load().single().title)
+    }
+
+    @Test
+    fun 版本不兼容备份核对即拒绝且恢复不覆盖当前数据() = runBlocking {
+        seedSampleData()
+        reopen()
+        db.taskDao().upsert(taskEntity("task-2", "当前有效数据"))
+        reopen()
+        // 手工构造 dbVersion 高于当前 schema 的合法加密备份
+        val future = rawBackupFile(testPayload(dbVersion = currentDbVersion() + 1), "future.zdbak")
+
+        val inspection = useCases.inspectBackup(future, password).getOrThrow()
+        assertFalse("高版本备份应标记不兼容", inspection.compatible)
+        assertTrue(
+            "不兼容原因应为中文：${inspection.incompatibilityReason}",
+            inspection.incompatibilityReason.orEmpty().contains("版本"),
+        )
+
+        val result = useCases.restoreAll(future, password)
+        assertTrue("版本不兼容必须拒绝恢复", result.isFailure)
+        val message = result.exceptionOrNull()?.message.orEmpty()
+        assertTrue("拒绝说明应为中文：$message", message.contains("版本"))
+        assertTrue("应说明当前数据未改动：$message", message.contains("未改动"))
+        assertEquals("当前数据未被覆盖", "当前有效数据", db.taskDao().get("task-2")?.title)
+    }
+
+    @Test
+    fun 损坏备份恢复失败且当前数据完好() = runBlocking {
+        seedSampleData()
+        reopen()
+        db.taskDao().upsert(taskEntity("task-2", "当前有效数据"))
+        reopen()
+        // 损坏一：不是知时鹿备份文件
+        val garbage = File(exportDir, "garbage.zdbak")
+        garbage.writeText("ZDBK垃圾数据不是合法备份")
+        val garbageResult = useCases.restoreAll(garbage, password)
+        assertTrue(garbageResult.isFailure)
+        assertTrue(
+            "提示应指出损坏：${garbageResult.exceptionOrNull()?.message}",
+            garbageResult.exceptionOrNull()?.message.orEmpty().contains("损坏") ||
+                garbageResult.exceptionOrNull()?.message.orEmpty().contains("不是知时鹿备份"),
+        )
+        // 损坏二：合法文件被截断（密文不完整，GCM 校验失败）
+        val good = File(exportDir, "good.zdbak")
+        useCases.exportAll(password, good).getOrThrow()
+        val truncated = File(exportDir, "truncated.zdbak")
+        truncated.writeBytes(good.readBytes().copyOfRange(0, (good.length() / 2).toInt()))
+        val truncatedResult = useCases.restoreAll(truncated, password)
+        assertTrue(truncatedResult.isFailure)
+        assertTrue(
+            "截断文件应提示口令错误或损坏：${truncatedResult.exceptionOrNull()?.message}",
+            truncatedResult.exceptionOrNull()?.message.orEmpty().contains("口令错误") ||
+                truncatedResult.exceptionOrNull()?.message.orEmpty().contains("损坏"),
+        )
+        // 当前数据两次失败后均原样
+        assertEquals("当前有效数据", db.taskDao().get("task-2")?.title)
+    }
+
+    @Test
+    fun 恢复中途失败时事务回滚当前数据原样() = runBlocking {
+        seedSampleData()
+        reopen()
+        // 当前数据被改动为 Y，会话有一条当前记录
+        db.taskDao().upsert(taskEntity("task-2", "当前数据Y"))
+        sessionStore.save(listOf(seedSession().copy(id = "session-now", title = "当前会话")))
+        reopen()
+        // 手工构造合法但含悬挂外键的备份：sub_tasks 引用不存在的父待办，
+        // 恢复将在清空 tasks 之后、插入 sub_tasks 时失败 → 事务整体回滚
+        val ghostRow = buildJsonObject {
+            put("id", JsonPrimitive("sub-ghost"))
+            put("parentId", JsonPrimitive("task-ghost"))
+            put("title", JsonPrimitive("悬挂引用"))
+            put("done", JsonPrimitive(0L))
+            put("doneAt", JsonNull)
+            put("sortOrder", JsonPrimitive(0L))
+            put("createdAt", JsonPrimitive(1L))
+            put("updatedAt", JsonPrimitive(1L))
+            put("trashedAt", JsonNull)
+        }
+        val payload = testPayload(
+            dbVersion = currentDbVersion(),
+            overrides = mapOf("sub_tasks" to listOf(ghostRow)),
+        )
+        val file = rawBackupFile(payload, "ghost.zdbak")
+
+        val result = useCases.restoreAll(file, password)
+
+        assertTrue("悬挂外键必须导致恢复失败", result.isFailure)
+        val message = result.exceptionOrNull()?.message.orEmpty()
+        assertTrue("失败提示应为中文：$message", message.contains("恢复"))
+        // 事务回滚：当前数据 Y 原样保留，未被半恢复状态污染
+        assertEquals("当前数据Y", db.taskDao().get("task-2")?.title)
+        assertEquals("对芒果过敏的提醒", db.taskDao().get("task-1")?.title)
+        assertEquals("会话历史未被改动", "当前会话", sessionStore.load().single().title)
+    }
+
+    @Test
+    fun 恢复空备份清空当前全部数据与会话() = runBlocking {
+        // 当前库为空时先导出一份空备份
+        val target = File(exportDir, "empty-restore.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        // 之后填入数据与会话
+        seedSampleData()
+        sessionStore.save(listOf(seedSession()))
+        reopen()
+
+        val summary = useCases.restoreAll(target, password).getOrThrow()
+
+        assertEquals("各表应全部清空", 0, summary.tableCounts.values.sum())
+        assertEquals(0, summary.aiSessionCount)
+        assertEquals(0, countTable("tasks"))
+        assertEquals(0, countTable("reminders"))
+        assertEquals(0, sessionStore.load().size)
+        assertEquals(0, countTable("memories"))
+    }
+
+    @Test
+    fun 会话历史还原失败时如实报告失败() = runBlocking {
+        seedSampleData()
+        reopen()
+        val target = File(exportDir, "restore-broken-session.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        reopen()
+        val broken = BackupUseCases(
+            database = db,
+            sessionHistory = { sessionStore.load() },
+            sessionRestorer = { throw IllegalStateException("会话文件被占用") },
+            now = { clock.last() },
+        )
+
+        val result = broken.restoreAll(target, password)
+
+        assertTrue("会话还原失败必须如实报告", result.isFailure)
+        val message = result.exceptionOrNull()?.message.orEmpty()
+        assertTrue("提示应指出会话历史：$message", message.contains("会话"))
+    }
+
+    // ---------- 测试 helper：手工构造 ZDBK 文件与替身 ----------
+
+    /** 手工加密负载用的 Json 实例（与 BackupUseCases 编码约定一致）。 */
+    private val testJson = kotlinx.serialization.json.Json { encodeDefaults = true }
+
+    /** 重新启用提醒测试的调度替身：记录调度与取消调用。 */
+    private class RecordingScheduler : AlarmScheduler {
+        val scheduled = mutableListOf<String>()
+        val cancelled = mutableListOf<String>()
+        override fun canScheduleExact(): Boolean = true
+        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+            scheduled += reminderId
+            return true
+        }
+        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+            scheduled += reminderId
+            return true
+        }
+        override fun cancel(reminderId: String) {
+            cancelled += reminderId
+        }
+    }
+
+    @Serializable
+    private data class TestPayload(
+        val formatVersion: Int,
+        val dbVersion: Int,
+        val exportedAt: Long,
+        val tableCounts: Map<String, Int>,
+        val tables: Map<String, JsonArray>,
+        val aiSessionCount: Int = 0,
+        val aiSessions: List<JsonElement> = emptyList(),
+    )
+
+    /** 构造十表齐全的测试负载：[overrides] 按表覆盖行集合，其余为空。 */
+    private fun testPayload(dbVersion: Int, overrides: Map<String, List<JsonObject>> = emptyMap()): TestPayload {
+        val tables = BackupUseCases.BACKUP_TABLES.associateWith { table ->
+            JsonArray(overrides[table].orEmpty())
+        }
+        return TestPayload(
+            formatVersion = BackupUseCases.FORMAT_VERSION,
+            dbVersion = dbVersion,
+            exportedAt = clock.last(),
+            tableCounts = tables.mapValues { it.value.size },
+            tables = tables,
+        )
+    }
+
+    /** 按备份格式（magic+版本+盐+迭代+IV+密文）手工加密为 ZDBK 文件，迭代取测试下限以加速。 */
+    private fun rawBackupFile(payload: TestPayload, name: String): File {
+        val plain = testJson.encodeToString(TestPayload.serializer(), payload)
+            .toByteArray(Charsets.UTF_8)
+        val iterations = 10_000
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        val spec = PBEKeySpec(password.toCharArray(), salt, iterations, 256)
+        val key = SecretKeySpec(
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded,
+            "AES",
+        )
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+        val body = cipher.doFinal(plain)
+        fun intBytes(v: Int) = byteArrayOf(
+            (v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte(),
+        )
+        val out = ByteArrayOutputStream()
+        out.write("ZDBK".toByteArray(Charsets.US_ASCII))
+        out.write(intBytes(BackupUseCases.FORMAT_VERSION))
+        out.write(salt)
+        out.write(intBytes(iterations))
+        out.write(iv)
+        out.write(body)
+        val file = File(exportDir, name)
+        file.writeBytes(out.toByteArray())
+        return file
+    }
+
+    /** 直读某表行数（不经 BackupUseCases，测试独立核对）。 */
+    private suspend fun countTable(table: String): Int =
+        db.useConnection(isReadOnly = true) { connection ->
+            connection.usePrepared("SELECT COUNT(*) FROM $table") { statement ->
+                if (statement.step()) statement.getLong(0).toInt() else 0
+            }
+        }
+
+    /** 直读当前数据库 schema 版本（PRAGMA user_version），断言不硬编码版本号。 */
+    private suspend fun currentDbVersion(): Int =
+        db.useConnection(isReadOnly = true) { connection ->
+            connection.usePrepared("PRAGMA user_version") { statement ->
+                if (statement.step()) statement.getLong(0).toInt() else 0
+            }
+        }
 
     private fun readIntBE(raw: ByteArray, offset: Int): Int =
         ((raw[offset].toInt() and 0xFF) shl 24) or
