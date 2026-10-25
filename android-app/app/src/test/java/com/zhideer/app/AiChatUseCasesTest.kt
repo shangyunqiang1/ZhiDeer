@@ -7,6 +7,9 @@ import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiConfig
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiConfigInput
+import com.zhideer.app.domain.usecase.AiContextAuthorizer
+import com.zhideer.app.domain.usecase.AiContextProvider
+import com.zhideer.app.domain.usecase.AiContextSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -75,6 +78,9 @@ class AiChatUseCasesTest {
             client = client,
             idGen = { "session-${idSeq.incrementAndGet()}" },
             now = { clock },
+            // T18/#19：既有 T17 测试不涉及授权上下文，注入空快照提供者保持既有行为
+            contextAuthorizer = AiContextAuthorizer(),
+            contextProvider = AiContextProvider { AiContextSnapshot(generatedAtText = "测试快照") },
         )
     }
 
