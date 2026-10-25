@@ -4,7 +4,9 @@ import androidx.room3.Database
 import androidx.room3.RoomDatabase
 
 /**
- * version 12：合并 T26/#27（memories 长期记忆表——用户显式保存并确认的偏好或事实，
+ * version 13：合并 T27/#28（memories 纯新增来源引用拆列 sourceRefType/sourceRefId/
+ * sourceRefMissing——记忆依据的原始记录引用，来源删除边界联动按来源级联标记与清理）。
+ * 历史：version 12：合并 T26/#27（memories 长期记忆表——用户显式保存并确认的偏好或事实，
  * 独立隐私数据表，无回收站列，删除即物理删除）。历史：
  * version 11：合并 T15/#16（occurrence_subtask_records 出现维度子任务步骤记录表，
  * 重复待办每一次出现按父待办子任务模板分别记录步骤勾选，唯一约束
@@ -34,7 +36,7 @@ import androidx.room3.RoomDatabase
         OccurrenceSubTaskRecordEntity::class,
         MemoryEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = true,
 )
 abstract class ZhiDeerDatabase : RoomDatabase() {
