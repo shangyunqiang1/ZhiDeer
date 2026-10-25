@@ -263,7 +263,7 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        "恢复后所有提醒将先暂停，需您逐项确认后才会重新启用；" +
+                        "恢复后所有提醒将先暂停、本机调度状态会重置，需您逐项确认后才会重新启用；" +
                             "恢复前的待确认参谋提案会失效、AI 上下文授权需重新确认；" +
                             "API Key 与本机配置不受恢复影响。",
                         style = MaterialTheme.typography.bodySmall,

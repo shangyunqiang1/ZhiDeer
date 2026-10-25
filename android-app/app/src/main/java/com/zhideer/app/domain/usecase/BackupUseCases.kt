@@ -182,6 +182,8 @@ internal data class BackupPayload(
  *   任一步失败（含恢复后自校验计数不符）整体回滚，当前有效数据原样保留；
  * - 提醒先暂停：恢复的待办/日程提醒行一律以停用状态落库，不自动重建任何未来提醒；
  *   摘要中给出暂停清单，经用户逐项确认与既有权限检查（未就绪/精确闹钟能力）后才重新调度；
+ * - 调度台账重置：设备本地的系统调度台账（reminder_schedule_log）不进入备份，恢复时清空，
+ *   旧终态（已投递/已错过）不会抑制重新启用的提醒，也不会伪造"已调度"事实；
  * - 记忆来源安全（T33/#34）：来源缺失（不可核验依据）的记忆恢复时强制停用，不把无法
  *   核对的偏好恢复成可用事实；停用/已删除关联状态与原文、来源 id 原样保留；
  * - 会话历史在 Room 事务成功后还原（[sessionRestorer]），失败如实报告；
@@ -399,9 +401,12 @@ class BackupUseCases(
         )
     }
 
-    /** 清空全部用户数据表（子表在前，避免级联与外键拦截）。 */
+    /** 清空全部用户数据表（子表在前，避免级联与外键拦截）与设备本地调度台账。 */
     private suspend fun clearAllTablesForRestore(scope: PooledConnection) {
         RESTORE_ORDER.asReversed().forEach { table ->
+            scope.usePrepared("DELETE FROM $table") { statement -> statement.step() }
+        }
+        RESTORE_ONLY_CLEAR_TABLES.forEach { table ->
             scope.usePrepared("DELETE FROM $table") { statement -> statement.step() }
         }
     }
@@ -742,9 +747,11 @@ class BackupUseCases(
         const val FORMAT_VERSION = 1
 
         /**
-         * 备份覆盖的全部用户数据表（Room v14 实体顺序，11 表）。
+         * 备份覆盖的全部用户数据表（Room v15 实体顺序，11 表）。
          * T33/#34 起纳入 clock_handoffs（系统闹钟交接记录）：交接记录是本应用发起的
          * 待核对请求与失败回退痕迹，属于需要完整恢复的业务可追溯数据。
+         * 不包含 reminder_schedule_log：系统调度台账是设备本地的调度/投递状态，
+         * 不是用户记录，恢复时清空并由重新启用的提醒按真实调度重建（见 [RESTORE_ONLY_CLEAR_TABLES]）。
          */
         val BACKUP_TABLES = listOf(
             "tasks",
@@ -781,6 +788,14 @@ class BackupUseCases(
             "memories",
             "clock_handoffs",
         )
+
+        /**
+         * 恢复时清空但不备份的本地表（T10/#11 系统调度台账，T33/#34 合并后补齐）：
+         * 台账记录本机已调度/已投递/错过等调度状态，属于设备本地事实而非用户数据。
+         * 整库替换后旧台账既可能以终态抑制新提醒的重新调度，也可能伪造"已调度"，
+         * 因此在恢复事务内一并清空；恢复后的提醒仍先暂停，用户确认启用时按真实调度重建。
+         */
+        private val RESTORE_ONLY_CLEAR_TABLES = listOf("reminder_schedule_log")
 
         /** 文件头 magic（ASCII），用于快速识别知时鹿备份文件。 */
         private val FILE_HEADER_MAGIC = "ZDBK".toByteArray(Charsets.US_ASCII)

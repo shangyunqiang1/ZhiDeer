@@ -15,6 +15,7 @@ import com.zhideer.app.data.db.NoteEntity
 import com.zhideer.app.data.db.NoteListItemEntity
 import com.zhideer.app.data.db.OccurrenceSubTaskRecordEntity
 import com.zhideer.app.data.db.ReminderEntity
+import com.zhideer.app.data.db.ReminderScheduleEntity
 import com.zhideer.app.data.db.SubTaskEntity
 import com.zhideer.app.data.db.TaskEntity
 import com.zhideer.app.data.db.TaskOccurrenceEntity
@@ -1090,6 +1091,32 @@ class BackupUseCasesTest {
             now = { clock.last() },
         ).observeActive().first()
         assertTrue("可用记忆集合不得包含来源缺失条目", active.none { it.id == "memory-unsafe" })
+    }
+
+    @Test
+    fun 恢复会重置设备本地调度台账且台账不进入备份() = runBlocking {
+        seedSampleData()
+        db.reminderScheduleLogDao().insertPending(
+            ReminderScheduleEntity(
+                reminderKey = "rem-1|1769000000000",
+                scheduledAtMillis = 1769000000000L,
+                ownerId = "task-1",
+                ownerTitle = "对芒果过敏的提醒",
+                state = "PENDING",
+                recordedAtMillis = 1L,
+            ),
+        )
+        reopen()
+        val target = File(exportDir, "t33-ledger.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+
+        // 调度台账是设备本地的调度/投递状态，不属于用户数据，不进入备份
+        val payload = useCases.readPayload(target, password).getOrThrow()
+        assertFalse("设备本地调度台账不应进入备份", payload.tables.containsKey("reminder_schedule_log"))
+
+        useCases.restoreAll(target, password).getOrThrow()
+        // 旧台账必须清空：避免旧终态抑制重新启用的提醒，或把本机未调度的事实伪装成已投递
+        assertEquals(0, countTable("reminder_schedule_log"))
     }
 
     @Test
