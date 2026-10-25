@@ -10,6 +10,7 @@ import com.zhideer.app.domain.model.AiProposalReminderSpec
 import com.zhideer.app.domain.model.AiProposalReminderType
 import com.zhideer.app.domain.model.AiProposalScope
 import com.zhideer.app.domain.model.AiProposalTargetRecord
+import com.zhideer.app.domain.model.ClockHandoff
 import com.zhideer.app.domain.model.MemoryType
 import com.zhideer.app.domain.model.RecurrenceFrequency
 import com.zhideer.app.domain.model.RecurrenceRule
@@ -87,6 +88,12 @@ private data class ProposalItemDto(
     // 仅本次必须同时给出 occurrenceDate（哪一次出现，yyyy-MM-dd）
     val scope: String? = null,
     val occurrenceDate: String? = null,
+    // T25/#26 系统闹钟字段：time 为本地响铃时刻（HH:mm，也容忍 yyyy-MM-ddTHH:mm），
+    // date 为可选的指定日历日期（平台 SET_ALARM 无法传达，确认时给回退而不是丢弃），
+    // weekdays 为星期规则（空 = 仅响一次）。
+    val time: String? = null,
+    val date: String? = null,
+    val weekdays: List<String>? = null,
 )
 
 /** 修改/删除提案的目标定位线索（T21/#22）：kind 为目标类型，title 为用户原话中的名称或关键词。 */
@@ -162,7 +169,7 @@ internal fun extractProposalJson(raw: String): String? {
 /** 生成注入请求的提案协议 system 提示（注入今天日期与时区，供模型推算相对日期）。 */
 internal fun buildProposalSystemPrompt(today: LocalDate, zoneId: ZoneId): String = buildString {
     appendLine("你是知时鹿（一款本地日程、待办与便签应用）的 AI 助手。")
-    appendLine("当用户明确想新增待办、便签或日程，或明确要求记住某条偏好/事实时，在回复的最末尾输出一个 ```json 代码块起草操作提案；提案只是供用户核对的草案，用户确认后才会真正保存。")
+    appendLine("当用户明确想新增待办、便签、日程或系统闹钟，或明确要求记住某条偏好/事实时，在回复的最末尾输出一个 ```json 代码块起草操作提案；提案只是供用户核对的草案，用户确认后才会真正保存。")
     appendLine("今天是 $today（${weekdayCn(today)}），用户时区 ${zoneId.id}。涉及相对日期（明天、下周三等）时按今天推算，一律写绝对日期。")
     appendLine("JSON 结构（proposals 数组可含多项）：")
     appendLine("```json")
@@ -174,12 +181,13 @@ internal fun buildProposalSystemPrompt(today: LocalDate, zoneId: ZoneId): String
             "{\"kind\":\"schedule\",\"title\":\"标题\",\"start\":\"2026-10-26T14:00\",\"end\":\"2026-10-26T15:30\"," +
             "\"location\":\"地点\",\"note\":\"备注\",\"category\":\"分类\"," +
             "\"reminder\":{\"type\":\"relative\",\"offsetMillis\":900000}}," +
-            "{\"kind\":\"memory\",\"content\":\"要记住的内容原话\",\"memoryType\":\"preference\"|\"fact\"}" +
+            "{\"kind\":\"memory\",\"content\":\"要记住的内容原话\",\"memoryType\":\"preference\"|\"fact\"}," +
+            "{\"kind\":\"alarm\",\"title\":\"起床\",\"time\":\"07:30\",\"weekdays\":[\"monday\",\"tuesday\"]}" +
             "]}",
     )
     appendLine("```")
     appendLine("字段规则：")
-    appendLine("1. 新增提案 kind 只能是 \"task\"（待办）、\"note\"（便签）、\"schedule\"（日程）或 \"memory\"（长期记忆），title 必填且不能为空（memory 条目除外，见规则 12）；修改与删除提案 kind 为 \"modify\" 或 \"delete\"，目标写在 target 字段（见规则 9-11）。")
+    appendLine("1. 新增提案 kind 只能是 \"task\"（待办）、\"note\"（便签）、\"schedule\"（日程）、\"memory\"（长期记忆）或 \"alarm\"（系统闹钟），title 必填且不能为空（memory 条目除外，见规则 12；alarm 的 title 是闹钟标签）；修改与删除提案 kind 为 \"modify\" 或 \"delete\"，目标写在 target 字段（见规则 9-11）。")
     appendLine("2. task 可选字段：note（备注）、priority（LOW/NORMAL/HIGH，默认 NORMAL）、category（分类）、dueDate 或 dueAt。")
     appendLine("3. dueDate 是日期截止（yyyy-MM-dd，不含具体时刻）；dueAt 是具体时刻截止（yyyy-MM-dd'T'HH:mm）。两者只能选其一，绝不同时给出；日期截止不要补 23:59 之类的时刻。")
     appendLine("4. 用户提到的时间不明确（如\"尽快\"或说不清具体哪天）时，先用文字向用户追问，确认后再输出 JSON；绝不编造日期。")
@@ -195,6 +203,8 @@ internal fun buildProposalSystemPrompt(today: LocalDate, zoneId: ZoneId): String
     appendLine("14. 子任务：新增待办要把事拆成步骤时用 \"subTasks\":[\"步骤一\",\"步骤二\"]，只给步骤标题，绝不编造用户没说的步骤；每一步在每次出现中独立勾选，父待办完成不会自动勾选子任务。修改待办可用 changes.subTasks 追加步骤（本次及以后生效）。便签、日程、记忆绝不携带 subTasks（便签清单不是子任务）。")
     appendLine("15. 修改或取消重复待办必须说明范围：\"scope\":\"this\" 表示仅本次，\"scope\":\"future\" 表示本次及以后；scope=this 必须同时给 \"occurrenceDate\":\"yyyy-MM-dd\" 指明是哪一次出现。仅本次修改只支持把这一次延期到另一天（changes.dueDate），绝不要用它改标题、规则或子任务；要改这些必须用 future。取消 scope=this 表示跳过该次出现，scope=future 表示整组取消（过去各次记录保留）。用户没说清范围时，先用文字向用户澄清，确认后再输出 JSON。")
     appendLine("16. 修改待办可用 changes.recurrence 替换重复规则，或用 \"clearRecurrence\":true 移除重复（二者互斥）；规则字段与规则 13 相同。recurrence、subTasks、scope、occurrenceDate 只属于待办，note/schedule/memory 绝不携带。")
+    appendLine("17. 系统闹钟提案结构：{\"kind\":\"alarm\",\"title\":\"闹钟标签\",\"time\":\"07:30\",\"weekdays\":[\"monday\",\"tuesday\"]}。用户要求起床闹钟、持续响铃或\"用系统时钟\"时使用。time 必须是确定的本地时刻（HH:mm），weekdays 为空表示仅响一次，写星期表示重复；用户说\"明早七点\"这类相对日期时只取时刻、不编造日期。用户指定某个日历日期（如下个月 5 号）时加 \"date\":\"yyyy-MM-dd\" 并原样保留日期，同时在文字里说明系统时钟接口无法传达日期、只能改用通知提醒或手动打开系统时钟；date 与 weekdays 不得同时给出。系统闹钟不是知时鹿提醒：绝不为了\"保险\"同时输出带提醒的 task/schedule，也不承诺系统已保存；alarm 条目绝不携带 note/dueDate/dueAt/start/end/reminder/reminders/recurrence/subTasks 等字段。")
+    appendLine("18. 用户只说\"设个闹钟\"\"叫我起床\"却没说明具体几点，或时间模糊（\"晚点\"\"平时起床时间\"）时，先用文字追问具体时间，确认后再输出 JSON；绝不自行编造响铃时间。系统闹钟的日期/重复规则说不清时同样先追问。")
 }
 
 private fun weekdayCn(date: LocalDate): String =
@@ -251,10 +261,12 @@ private fun parseProposalItem(
     "note" -> parseCreateItem(dto, n, AiProposalKind.NOTE, zoneId, idGen)
     "schedule" -> parseCreateItem(dto, n, AiProposalKind.SCHEDULE, zoneId, idGen)
     "memory" -> parseMemoryItem(dto, n, idGen)
+    // T25/#26：系统闹钟只支持新增（系统时钟内容不可读，修改/取消须在系统时钟内完成）
+    "alarm", "clock" -> parseAlarmItem(dto, n, idGen)
     "modify" -> parseModifyItem(dto, n, zoneId, idGen)
     "delete" -> parseDeleteItem(dto, n, idGen)
     else -> throw ProposalFieldException(
-        "第 $n 项提案的类型无法识别（kind 只能是 task、note、schedule、memory、modify 或 delete）。",
+        "第 $n 项提案的类型无法识别（kind 只能是 task、note、schedule、memory、alarm、modify 或 delete）。",
     )
 }
 
@@ -304,6 +316,111 @@ private fun parseMemoryItem(dto: ProposalItemDto, n: Int, idGen: () -> String): 
 private fun memoryTitleOf(dto: ProposalItemDto, content: String): String {
     val given = dto.title?.trim().orEmpty()
     return if (given.isNotEmpty()) given else content.take(MEMORY_TITLE_MAX) + if (content.length > MEMORY_TITLE_MAX) "…" else ""
+}
+
+// ---------- T25/#26 系统闹钟条目：解析、预览与校验 ----------
+
+/** 系统闹钟响铃时刻的解析结果：本地时/分 + time 里可能内嵌的日期（yyyy-MM-dd）。 */
+private data class ParsedAlarmTime(val hour: Int, val minute: Int, val embeddedDate: String?)
+
+/**
+ * 解析系统闹钟条目（T25/#26）：只接受标签、确定响铃时刻、可选日历日期与星期规则。
+ * 边界（设备实测 D09/D10）：
+ * - time 缺失（模型把模糊时间留空）时整批拒绝，中文提示先向用户确认具体时间；
+ * - date 与 weekdays 互斥；date 原样保留（平台接口无法传达日期，确认时给回退而不是丢弃）；
+ * - 其他类型字段一律拒绝：系统闹钟不是知时鹿提醒，绝不混写提醒/待办/日程字段。
+ */
+private fun parseAlarmItem(dto: ProposalItemDto, n: Int, idGen: () -> String): AiProposalItem {
+    if (dto.target != null || dto.changes != null || dto.action != null) {
+        throw ProposalFieldException(
+            "第 $n 项系统闹钟提案不应包含修改或删除字段（target/changes/action）：系统闹钟只能在系统时钟中管理。",
+        )
+    }
+    if (!dto.scope.isNullOrEmpty() || !dto.occurrenceDate.isNullOrEmpty()) {
+        throw ProposalFieldException("第 $n 项系统闹钟提案不应包含范围字段（scope/occurrenceDate）。")
+    }
+    val foreign = dto.note != null || dto.priority != null || dto.category != null ||
+        dto.dueDate != null || dto.dueAt != null || dto.content != null ||
+        !dto.tags.isNullOrEmpty() || !dto.items.isNullOrEmpty() ||
+        dto.start != null || dto.end != null || dto.location != null ||
+        dto.reminder != null || !dto.reminders.isNullOrEmpty() ||
+        dto.recurrence != null || !dto.subTasks.isNullOrEmpty()
+    if (foreign) {
+        throw ProposalFieldException(
+            "第 $n 项提案是系统闹钟类型，只支持 title（标签）、time、date 与 weekdays 字段：" +
+                "系统闹钟不是知时鹿提醒，绝不携带提醒、待办或日程字段。",
+        )
+    }
+    val timeRaw = dto.time?.trim().takeUnless { it.isNullOrEmpty() }
+        ?: throw ProposalFieldException(
+            "第 $n 项系统闹钟提案缺少响铃时间（time）：请先向用户确认具体几点（如 07:30）后再起草；本次未创建任何内容。",
+        )
+    val time = parseAlarmTime(timeRaw, n)
+    val dateRaw = dto.date?.trim().takeUnless { it.isNullOrEmpty() }
+    if (dateRaw != null && time.embeddedDate != null && dateRaw != time.embeddedDate) {
+        throw ProposalFieldException(
+            "第 $n 项系统闹钟提案的日期不一致（time 与 date 指向不同日期）：请只保留一个日期，绝不猜测。",
+        )
+    }
+    val dateEpochDay = (time.embeddedDate ?: dateRaw)?.let { parseAlarmDate(it, n) }
+    val weekdays = dto.weekdays.orEmpty().map { parseWeekdayToken(it, n).value }.distinct().sorted()
+    if (dateEpochDay != null && weekdays.isNotEmpty()) {
+        throw ProposalFieldException(
+            "第 $n 项系统闹钟提案不能同时指定日历日期与星期规则：指定日期只响一次，重复请只给 weekdays。",
+        )
+    }
+    val title = dto.title?.trim()?.takeIf { it.isNotEmpty() } ?: "系统闹钟"
+    return AiProposalItem(
+        id = idGen(),
+        kind = AiProposalKind.ALARM,
+        title = title,
+        alarmHour = time.hour,
+        alarmMinute = time.minute,
+        alarmEpochDay = dateEpochDay,
+        alarmWeekdays = weekdays,
+    )
+}
+
+/**
+ * 响铃时刻：接受 HH:mm，也容忍模型把日期并进 time（yyyy-MM-ddTHH:mm）。
+ * 模糊词（"早上""晚点"）一律报格式错误，提示先向用户确认具体时间，绝不猜测。
+ */
+private fun parseAlarmTime(raw: String, n: Int): ParsedAlarmTime {
+    val full = Regex("^(\\d{4})-(\\d{1,2})-(\\d{1,2})[T ](\\d{1,2}):(\\d{2})$").find(raw)
+    if (full != null) {
+        val date = full.groupValues[1] + "-" + full.groupValues[2].padStart(2, '0') +
+            "-" + full.groupValues[3].padStart(2, '0')
+        val hour = full.groupValues[4].toInt()
+        val minute = full.groupValues[5].toInt()
+        requireAlarmClockValid(hour, minute, n)
+        return ParsedAlarmTime(hour, minute, date)
+    }
+    val match = Regex("^(\\d{1,2}):(\\d{2})$").find(raw)
+        ?: throw ProposalFieldException(
+            "第 $n 项系统闹钟提案的响铃时间格式无法识别（time 应为 HH:mm，如 07:30）：" +
+                "请先向用户确认具体几点后再起草；本次未创建任何内容。",
+        )
+    val hour = match.groupValues[1].toInt()
+    val minute = match.groupValues[2].toInt()
+    requireAlarmClockValid(hour, minute, n)
+    return ParsedAlarmTime(hour, minute, null)
+}
+
+/** 小时/分钟范围校验（与 ClockHandoffUseCases.preview 同一语义）。 */
+private fun requireAlarmClockValid(hour: Int, minute: Int, n: Int) {
+    if (hour !in 0..23) {
+        throw ProposalFieldException("第 $n 项系统闹钟提案的小时非法（需在 0–23 之间）：$hour")
+    }
+    if (minute !in 0..59) {
+        throw ProposalFieldException("第 $n 项系统闹钟提案的分钟非法（需在 0–59 之间）：$minute")
+    }
+}
+
+/** 指定日历日期（原样保留，不静默丢弃）；格式非法中文提示。 */
+private fun parseAlarmDate(raw: String, n: Int): Long = try {
+    LocalDate.parse(raw).toEpochDay()
+} catch (e: DateTimeParseException) {
+    throw ProposalFieldException("第 $n 项系统闹钟提案的日期格式无法识别（date 应为 yyyy-MM-dd）：$raw")
 }
 
 /** 目标 DTO → 目标类型；缺失或非法给出中文可诊断提示。 */
@@ -422,6 +539,9 @@ private fun parseDeleteItem(dto: ProposalItemDto, n: Int, idGen: () -> String): 
         // T28/#29：记忆条目只支持新增提案（targetKindOf 不会给出 MEMORY，此分支为穷举防御）
         AiProposalKind.MEMORY ->
             throw ProposalFieldException("第 $n 项删除提案目标类型非法（记忆不支持删除提案，可在记忆页面停用或删除）。")
+        // T25/#26：系统闹钟只支持新增提案（targetKindOf 不会给出 ALARM，此分支为穷举防御）
+        AiProposalKind.ALARM ->
+            throw ProposalFieldException("第 $n 项删除提案目标类型非法（系统闹钟只能在系统时钟中删除）。")
     }
     // T22/#23：取消重复待办时可选范围（仅本次=跳过该次出现；本次及以后=整组取消）；
     // 目标是否重复由设备端定位后判定，范围缺失时由用例层在落提案前中文追问。
@@ -511,6 +631,9 @@ private fun parseChanges(dto: ProposalChangesDto, kind: AiProposalKind, n: Int, 
         // T28/#29：记忆条目只支持新增提案（targetKindOf 不会给出 MEMORY，此分支为穷举防御）
         AiProposalKind.MEMORY ->
             throw ProposalFieldException("第 $n 项修改提案目标类型非法（记忆不支持修改提案，可在记忆页面编辑）。")
+        // T25/#26：系统闹钟只支持新增提案（targetKindOf 不会给出 ALARM，此分支为穷举防御）
+        AiProposalKind.ALARM ->
+            throw ProposalFieldException("第 $n 项修改提案目标类型非法（系统闹钟只能在系统时钟中修改）。")
     }
 }
 
@@ -1182,6 +1305,20 @@ internal fun summarizeProposal(items: List<AiProposalItem>, zoneId: ZoneId): Str
                     append("[记忆] ").append(item.content)
                     append("（").append(memoryTypeCn(item.memoryType)).append("）")
                 }
+                // T25/#26 系统闹钟摘要：确定时间 + 重复规则 + 来源/核对边界
+                AiProposalKind.ALARM -> {
+                    append("[系统闹钟] ").append(item.title)
+                    val details = buildList {
+                        proposalAlarmTimeText(item)?.let { add("响铃 $it") }
+                        add("重复 ${proposalAlarmRepeatText(item)}")
+                        if (item.alarmEpochDay != null) {
+                            add("日期无法传达给系统时钟，需改用知时鹿提醒或手动打开系统时钟")
+                        } else {
+                            add("来源：系统时钟，是否保存需在系统时钟核对")
+                        }
+                    }
+                    append("（").append(details.joinToString("，")).append("）")
+                }
             }
         }
     }
@@ -1193,6 +1330,7 @@ internal fun kindCn(kind: AiProposalKind): String = when (kind) {
     AiProposalKind.NOTE -> "便签"
     AiProposalKind.SCHEDULE -> "日程"
     AiProposalKind.MEMORY -> "记忆"
+    AiProposalKind.ALARM -> "系统闹钟"
 }
 
 /** 变更集涉及的字段名列表（摘要与预览共用）。 */
@@ -1370,6 +1508,60 @@ internal fun memoryTypeCn(memoryType: String): String = when (memoryType.upperca
     else -> "事实"
 }
 
+// ---------- T25/#26 系统闹钟预览（摘要、提案卡片与回执共用同一口径） ----------
+
+/** 响铃时间文本：HH:mm；指定日历日期时显示 yyyy-MM-dd HH:mm（日期不丢失）。 */
+internal fun proposalAlarmTimeText(item: AiProposalItem): String? {
+    if (item.kind != AiProposalKind.ALARM) return null
+    val hour = item.alarmHour ?: return null
+    val minute = item.alarmMinute ?: return null
+    val time = "%02d:%02d".format(hour, minute)
+    return item.alarmEpochDay?.let { LocalDate.ofEpochDay(it).toString() + " " + time } ?: time
+}
+
+/** 重复规则文本：仅响一次 / 每天 / 每周 一、三（与系统闹钟交接记录同一口径）。 */
+internal fun proposalAlarmRepeatText(item: AiProposalItem): String {
+    val days = item.alarmWeekdays.distinct().sorted()
+    return when {
+        days.isEmpty() -> "仅响一次"
+        days == (1..7).toList() -> "每天"
+        else -> "每周 " + days.joinToString("、") { ClockHandoff.WEEKDAY_NAMES[it] ?: "?" }
+    }
+}
+
+/**
+ * 系统闹钟条目的预览行（T25/#26 验收第 1、3、5 条）：
+ * 明确来源是系统时钟（无法核实是否保存）并与知时鹿提醒对比；指定日期时说明平台接口限制、
+ * 保留日期并给出两条回退（通知提醒 / 手动打开系统时钟）；确认前不跳转；
+ * 回退不自动创建自有提醒，避免与系统闹钟双份响铃。
+ */
+internal fun proposalAlarmDetailLines(item: AiProposalItem): List<String> {
+    if (item.kind != AiProposalKind.ALARM) return emptyList()
+    return buildList {
+        proposalAlarmTimeText(item)?.let { add("响铃时间：$it") }
+        add("重复规则：${proposalAlarmRepeatText(item)}")
+        add("来源：系统时钟（知时鹿无法核实系统时钟是否真的保存，请到系统时钟核对）")
+        add("对比：知时鹿提醒由应用内通知触发、状态可核对；系统闹钟由系统时钟管理，用于持续响铃")
+        if (item.alarmEpochDay != null) {
+            add(
+                "限制：系统时钟接口只接受小时与分钟，无法传达日期 " +
+                    LocalDate.ofEpochDay(item.alarmEpochDay) + "（日期已保留，不静默丢弃）",
+            )
+            add("回退：① 改用知时鹿通知提醒（另行说明提醒时间并确认起草）；② 打开系统时钟手动选择日期")
+        }
+        add("确认前不会跳转或创建任何提醒；确认后才向系统时钟发起创建请求")
+        add("回退不会自动创建知时鹿提醒；若同时存在系统闹钟与提醒，请检查避免双份响铃")
+    }
+}
+
+/** ALARM 条目是否携带了其他类型的字段（解析层已拒绝，确认执行前再防御一次）。 */
+private fun hasForeignAlarmFields(item: AiProposalItem): Boolean =
+    item.note.isNotBlank() || item.dueEpochDay != null || item.dueAtMillis != null ||
+        item.content.isNotBlank() || item.tags.isNotEmpty() || item.items.isNotEmpty() ||
+        item.startMillis != null || item.endMillis != null || item.location.isNotBlank() ||
+        item.reminders.isNotEmpty() || item.recurrence != null || item.subTasks.isNotEmpty() ||
+        item.scope != null || item.occurrenceEpochDay != null
+
 internal fun priorityCn(priority: String): String = when (priority) {
     "LOW" -> "低"
     "HIGH" -> "高"
@@ -1474,6 +1666,22 @@ internal fun validateProposalItem(item: AiProposalItem): String? = when (item.op
         item.kind == AiProposalKind.SCHEDULE && item.endMillis!! < item.startMillis!! ->
             "结束时间早于开始时间"
         item.kind == AiProposalKind.MEMORY && item.content.isBlank() -> "记忆内容为空"
+        // T25/#26：系统闹钟条目只接受确定时刻、星期与（可选的）日历日期
+        item.kind == AiProposalKind.ALARM && (item.alarmHour == null || item.alarmMinute == null) ->
+            "系统闹钟缺少响铃时间（时/分）"
+        item.kind == AiProposalKind.ALARM &&
+            ((item.alarmHour ?: -1) !in 0..23 || (item.alarmMinute ?: -1) !in 0..59) ->
+            "系统闹钟响铃时间非法（小时 0–23、分钟 0–59）"
+        item.kind == AiProposalKind.ALARM && item.alarmWeekdays.any { it !in 1..7 } ->
+            "系统闹钟星期规则非法（1=周一…7=周日）"
+        item.kind == AiProposalKind.ALARM && item.alarmEpochDay != null && item.alarmWeekdays.isNotEmpty() ->
+            "系统闹钟不能同时指定日期与星期"
+        item.kind == AiProposalKind.ALARM && hasForeignAlarmFields(item) ->
+            "系统闹钟条目不能携带提醒、待办、日程或记忆字段"
+        item.kind != AiProposalKind.ALARM &&
+            (item.alarmHour != null || item.alarmMinute != null ||
+                item.alarmEpochDay != null || item.alarmWeekdays.isNotEmpty()) ->
+            "非系统闹钟条目不能包含响铃时间或星期"
         item.reminders.isNotEmpty() &&
             item.reminders.firstNotNullOfOrNull { reminderSpecProblem(it, item.startMillis) } != null ->
             "提醒字段非法：" + item.reminders.firstNotNullOfOrNull { reminderSpecProblem(it, item.startMillis) }
@@ -1481,6 +1689,8 @@ internal fun validateProposalItem(item: AiProposalItem): String? = when (item.op
     }
     // T21/#22：修改条目防御校验（目标线索、变更集、日程成对时间）
     AiProposalOp.MODIFY -> when {
+        // T25/#26：系统闹钟只支持新增（应用无法读取/修改系统时钟内容）
+        item.kind == AiProposalKind.ALARM -> "系统闹钟不支持修改提案（请在系统时钟中修改）"
         item.targetTitle.isBlank() -> "修改提案缺少目标线索"
         item.changes == null -> "修改提案没有变更内容"
         item.kind == AiProposalKind.SCHEDULE &&
@@ -1506,6 +1716,8 @@ internal fun validateProposalItem(item: AiProposalItem): String? = when (item.op
     }
     // T21/#22：删除条目防御校验（目标线索、动作合法性）
     AiProposalOp.DELETE -> when {
+        // T25/#26：系统闹钟只支持新增（应用无法读取/修改系统时钟内容）
+        item.kind == AiProposalKind.ALARM -> "系统闹钟不支持删除提案（请在系统时钟中删除）"
         item.targetTitle.isBlank() -> "删除提案缺少目标线索"
         item.kind == AiProposalKind.TASK && item.deleteAction == null -> "待办删除缺少动作（取消或删除）"
         item.kind != AiProposalKind.TASK && item.deleteAction == AiProposalDeleteAction.CANCEL ->

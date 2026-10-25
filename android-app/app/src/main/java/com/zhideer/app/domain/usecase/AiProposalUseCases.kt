@@ -13,6 +13,7 @@ import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalSendReply
 import com.zhideer.app.domain.model.AiProposalStatus
 import com.zhideer.app.domain.model.AiProposalTargetRecord
+import com.zhideer.app.domain.model.ClockCapability
 import com.zhideer.app.domain.model.MemorySource
 import com.zhideer.app.domain.model.Reminder
 import com.zhideer.app.domain.model.TaskPriority
@@ -23,7 +24,7 @@ import java.time.ZoneId
 
 /**
  * AI 操作提案用例（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除，
- * T22/#23 扩展重复规则、子任务与「仅本次/本次及以后」范围）：
+ * T22/#23 扩展重复规则、子任务与「仅本次/本次及以后」范围，T25/#26 扩展系统闹钟交接）：
  * 起草提案入库、确认执行、忽略与逐项移除、多候选目标点选。
  *
  * 状态机（GLOSSARY「操作提案」：尚未执行、供用户核对的方案；用户确认后才执行）：
@@ -32,6 +33,10 @@ import java.time.ZoneId
  *   --结果回写--> EXECUTED（成功/部分失败/全部失败均如实回写 resultMessage 并回执到对话流）；
  * - PENDING --dismiss/清空条目--> EXPIRED（不执行、不残留可执行状态）；
  * - 进程在 CONFIRMED 期间中断时结果未知：再次确认返回"待核实"提示，绝不虚报成功或失败，也不重复执行。
+ *
+ * 系统闹钟（T25/#26）：确认后经既有 [ClockHandoffUseCases] 发起交接，只记录「待核对」，
+ * 不宣称系统闹钟已保存；指定日历日期或平台无处理器时**不发起**并给两条回退；
+ * 该路径绝不创建知时鹿提醒（避免与系统闹钟双份响铃）。
  *
  * 确认执行（真实入口，不绕过）：
  * - 新增：待办经 [TaskUseCases.create]（重复规则再经 [RecurrenceUseCases.create]、子任务步骤逐条经
@@ -82,6 +87,9 @@ class AiProposalUseCases(
     // 零回归，生产装配必须传入；缺省时重复/子任务提案确认返回中文错误、绝不静默丢失）
     private val recurrenceUseCases: RecurrenceUseCases? = null,
     private val subTaskUseCases: SubTaskUseCases? = null,
+    // T25/#26 纯新增：系统闹钟提案确认执行经既有 ClockHandoffUseCases 发起交接（可空默认值保持
+    // 既有构造零回归；生产装配必须传入，缺省时闹钟提案确认返回中文错误、绝不静默丢失）
+    private val clockHandoffUseCases: ClockHandoffUseCases? = null,
     private val idGen: () -> String,
     private val now: () -> Long,
     // 创建时区（提案截止/日程起止换算基准）；公开供提案卡片按同一时区渲染可读时间
@@ -256,6 +264,8 @@ class AiProposalUseCases(
         // T28/#29：记忆条目只支持新增（CREATE），修改/删除记忆不走目标定位；
         // 若未来开放修改/删除记忆，其目标读取应经此记忆授权门。
         AiProposalKind.MEMORY -> AiContextCategory.MEMORY
+        // T25/#26：系统闹钟只支持新增，不读取本地记录、不参与目标定位（穷举防御分支，实际不可达）
+        AiProposalKind.ALARM -> AiContextCategory.SCHEDULE
     }
 
     /** 匹配失败/未授权等中文追问写入会话（留痕），写入失败不影响发送结果。 */
@@ -265,6 +275,23 @@ class AiProposalUseCases(
 
     /** 全部提案（存储顺序，追加在后）；UI 按会话过滤渲染卡片。 */
     fun observeProposals(): Flow<List<AiProposal>> = store.observe()
+
+    // ---------- T25/#26 系统闹钟：能力探测与回退 ----------
+
+    /** 当前系统时钟能力（null = 交接入口未装配）；卡片据此展示不可用与回退，绝不假装可用。 */
+    fun clockCapability(): ClockCapability? = clockHandoffUseCases?.capability()
+
+    /**
+     * 回退选项②：打开系统时钟列表（或系统时钟应用）供用户手动核对/设置。
+     * 不写交接记录、不创建任何闹钟或知时鹿提醒；失败一律中文提示。
+     */
+    suspend fun openSystemClock(): Result<Unit> =
+        clockHandoffUseCases?.openAlarmList()
+            ?: Result.failure(IllegalStateException("系统时钟入口未配置，请手动打开系统时钟。"))
+
+    /** 回退说明（含双响警告），供系统闹钟提案卡片展示；与交接页同一口径。 */
+    fun clockFallbackHint(): String = clockHandoffUseCases?.fallbackHint()
+        ?: "回退选择：① 手动打开系统时钟自行设置；② 在知时鹿内为事项设置提醒。若两者同时存在，可能重复响铃。"
 
     /**
      * 确认提案（幂等）：
@@ -482,6 +509,8 @@ class AiProposalUseCases(
         val noteIds = mutableListOf<String>()
         val scheduleIds = mutableListOf<String>()
         val memoryIds = mutableListOf<String>()
+        // T25/#26：系统闹钟交接记录 id（只表示已发起请求，记录本身保持待核对）
+        val alarmHandoffIds = mutableListOf<String>()
         val okLines = mutableListOf<String>()
         val failLines = mutableListOf<String>()
         claimed.items.forEachIndexed { index, item ->
@@ -499,6 +528,8 @@ class AiProposalUseCases(
                         }
                         // T28/#29：记忆提案确认后经 MemoryUseCases 真实入口保存（来源 CHAT，写入即已确认）
                         AiProposalKind.MEMORY -> createChatMemory(item)
+                        // T25/#26：系统闹钟经 ClockHandoffUseCases 发起交接；指定日期/无处理器不发起
+                        AiProposalKind.ALARM -> executeAlarmHandoff(item)
                     }
                     // T21/#22：修改与删除经真实用例入口执行
                     AiProposalOp.MODIFY -> executeModify(item)
@@ -529,6 +560,14 @@ class AiProposalUseCases(
                                 memoryIds += created.id
                                 okLines += "$label 记忆「${item.content}」已创建（来源：聊天确认；记录 id=${created.id}）"
                             }
+                            AiProposalKind.ALARM -> {
+                                alarmHandoffIds += created.id
+                                // 只宣称「已发起交接」，绝不宣称系统闹钟已保存（应用无法核实）
+                                okLines += "$label 系统闹钟「${item.title}」已发起交接" +
+                                    "（${proposalAlarmTimeText(item)}，${proposalAlarmRepeatText(item)}；" +
+                                    "状态：待核对——知时鹿只发起创建请求，无法核实系统时钟是否保存，" +
+                                    "请到系统时钟核对；未创建知时鹿提醒；记录 id=${created.id}）"
+                            }
                         }
                         AiProposalOp.MODIFY -> {
                             if (item.scope == AiProposalScope.THIS_OCCURRENCE) {
@@ -558,7 +597,10 @@ class AiProposalUseCases(
                 },
             )
         }
-        val resultMessage = buildResultMessage(okLines, failLines, claimed.items.all { it.op == AiProposalOp.CREATE })
+        // T25/#26：含系统闹钟的提案不使用「已创建」措辞——只发起了交接请求，不是已保存的系统闹钟
+        val allCreate = claimed.items.all { it.op == AiProposalOp.CREATE } &&
+            claimed.items.none { it.kind == AiProposalKind.ALARM }
+        val resultMessage = buildResultMessage(okLines, failLines, allCreate)
         val executed = store.transition(claimed.id, setOf(AiProposalStatus.CONFIRMED)) {
             it.copy(
                 status = AiProposalStatus.EXECUTED,
@@ -566,6 +608,7 @@ class AiProposalUseCases(
                 createdNoteIds = noteIds,
                 createdScheduleIds = scheduleIds,
                 createdMemoryIds = memoryIds,
+                createdAlarmHandoffIds = alarmHandoffIds,
                 resultMessage = resultMessage,
                 // T30/#31：真实执行是否全部成功（成功才可标记采纳；失败/部分失败不标已采纳）
                 executionSucceeded = failLines.isEmpty(),
@@ -574,6 +617,53 @@ class AiProposalUseCases(
         // 结果回写到对话流（成功消息含已执行记录标识）；回执写入失败不影响执行结果
         executed.sessionId?.let { chat.appendAssistantMessage(it, resultMessage) }
         return Result.success(executed)
+    }
+
+    /**
+     * 系统闹钟交接（T25/#26）：确认后调用既有 [ClockHandoffUseCases] 真实入口。
+     *
+     * 平台事实（docs/validation/t02-oppo-device.md D09/D10）：
+     * - SET_ALARM 只接受时/分与星期，无法传达日历日期：指定日期时**不发起**（不丢日期），
+     *   如实失败并给出「知时鹿通知提醒 / 手动打开系统时钟」两条回退；
+     * - 无 handler 时**禁用发起**且不写交接记录，中文说明回退，不崩溃、不冒充成功；
+     * - 发起成功只记录「待核对」，绝不宣称系统闹钟已保存；
+     * - 本路径不创建任何知时鹿提醒/待办/日程（回退也不自动创建，避免双份响铃）。
+     */
+    private suspend fun executeAlarmHandoff(item: AiProposalItem): Result<CreatedRecord> {
+        val clock = clockHandoffUseCases
+            ?: return Result.failure(IllegalStateException("系统时钟交接入口未配置，无法发起交接"))
+        val hour = item.alarmHour
+            ?: return Result.failure(IllegalStateException("系统闹钟缺少响铃时间（时）"))
+        val minute = item.alarmMinute
+            ?: return Result.failure(IllegalStateException("系统闹钟缺少响铃时间（分）"))
+        val preview = clock.preview(
+            hour = hour,
+            minute = minute,
+            label = item.title,
+            targetEpochDay = item.alarmEpochDay,
+            weekdays = item.alarmWeekdays.toSet(),
+        ).getOrElse { return Result.failure(it) }
+        if (preview.dateNotConveyable) {
+            val date = item.alarmEpochDay?.let { LocalDate.ofEpochDay(it).toString() }.orEmpty()
+            return Result.failure(
+                IllegalStateException(
+                    "系统时钟接口只接受小时与分钟，无法传达日期 $date：日期已保留，本次未发起跳转、未创建任何提醒。" +
+                        "回退可选：① 改用知时鹿通知提醒（另行起草并确认）；② 打开系统时钟手动选择日期。",
+                ),
+            )
+        }
+        if (!preview.capability.canCreateAlarm) {
+            return Result.failure(
+                IllegalStateException(
+                    "当前系统没有可用的时钟应用，已禁用发起：本次未跳转、未创建任何提醒。" +
+                        "回退可选：① 手动打开系统时钟（如系统允许）；② 改用知时鹿提醒。",
+                ),
+            )
+        }
+        return clock.handoff(preview).fold(
+            onSuccess = { handoff -> Result.success(CreatedRecord(handoff.id)) },
+            onFailure = { e -> Result.failure(e) },
+        )
     }
 
     /**
@@ -606,6 +696,9 @@ class AiProposalUseCases(
             AiProposalKind.SCHEDULE -> modifySchedule(targetId, changes)
             // T28/#29：记忆条目只支持新增提案，不参与修改执行（解析层已拒绝，穷举防御分支）
             AiProposalKind.MEMORY -> Result.failure(IllegalStateException("记忆不支持修改提案，可在记忆页面编辑"))
+            // T25/#26：系统闹钟只支持新增提案（解析层已拒绝，穷举防御分支）
+            AiProposalKind.ALARM ->
+                Result.failure(IllegalStateException("系统闹钟不支持修改提案，请在系统时钟中调整"))
         }
     }
 
@@ -782,6 +875,9 @@ class AiProposalUseCases(
             AiProposalKind.SCHEDULE -> calendarUseCases.trash(targetId).map { CreatedRecord(targetId) }
             // T28/#29：记忆条目只支持新增提案，不参与删除执行（解析层已拒绝，穷举防御分支）
             AiProposalKind.MEMORY -> Result.failure(IllegalStateException("记忆不支持删除提案，可在记忆页面删除"))
+            // T25/#26：系统闹钟只支持新增提案（解析层已拒绝，穷举防御分支）
+            AiProposalKind.ALARM ->
+                Result.failure(IllegalStateException("系统闹钟不支持删除提案，请在系统时钟中删除"))
         }
     }
 
@@ -904,6 +1000,9 @@ class AiProposalUseCases(
         item.op == AiProposalOp.CREATE && item.kind == AiProposalKind.TASK &&
             item.subTasks.isNotEmpty() && subTaskUseCases == null ->
             "子任务入口未配置，无法保存子任务"
+        item.op == AiProposalOp.CREATE && item.kind == AiProposalKind.ALARM &&
+            clockHandoffUseCases == null ->
+            "系统时钟交接入口未配置，无法发起交接"
         item.op == AiProposalOp.MODIFY &&
             (item.changes?.recurrence != null || item.changes?.clearRecurrence == true) &&
             recurrenceUseCases == null ->

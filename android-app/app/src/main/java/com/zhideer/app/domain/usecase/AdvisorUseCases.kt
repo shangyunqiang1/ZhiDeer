@@ -540,6 +540,8 @@ class AdvisorUseCases(
         AiProposalKind.MEMORY -> memoryUseCases?.get(recordId)?.fingerprint()
         // 参谋建议不产生便签依据：无读取入口时视为不可核对（保守判为失效）
         AiProposalKind.NOTE -> null
+        // T25/#26：系统闹钟不是本地记录（应用无法读取），不产生建议依据
+        AiProposalKind.ALARM -> null
     }
 
     /** 依据失效原因（null = 仍与生成时一致）；修改、完成、删除、失效都会改变指纹或使记录消失。 */
