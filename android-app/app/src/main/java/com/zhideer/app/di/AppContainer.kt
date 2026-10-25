@@ -360,6 +360,10 @@ class AppContainer(
             targetMatcher = aiProposalTargetMatcher,
             // T28/#29 纯新增：记忆提案确认后经长期记忆真实入口保存（来源聊天确认）
             memoryUseCases = memoryUseCases,
+            // T22/#23 纯新增：重复规则与子任务提案确认后经既有真实入口落地
+            // （确认执行走 RecurrenceUseCases/TaskUseCases/SubTaskUseCases，不另建 AI 路径）
+            recurrenceUseCases = recurrenceUseCases,
+            subTaskUseCases = subTaskUseCases,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,

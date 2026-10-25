@@ -97,6 +97,9 @@ class AiProposalTargetMatcher(
         dueEpochDay = dueEpochDay,
         dueAtMillis = dueAtMillis,
         status = status.name,
+        // T22/#23：重复待办快照携带当前规则与出现锚点，供范围选择与单次延期预览
+        recurrence = recurrenceRule?.toProposalRecurrence(),
+        anchorEpochDay = recurrenceRule?.let { RecurrenceUseCases.anchorEpochDay(this) },
     )
 
     private fun com.zhideer.app.domain.model.Note.toTargetRecord() = AiProposalTargetRecord(

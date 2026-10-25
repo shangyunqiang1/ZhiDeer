@@ -3,7 +3,8 @@ package com.zhideer.app.domain.model
 import kotlinx.serialization.Serializable
 
 /**
- * AI 操作提案领域模型（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除）。
+ * AI 操作提案领域模型（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除，
+ * T22/#23 扩展重复规则、子任务与「仅本次/本次及以后」范围）。
  * GLOSSARY「操作提案」：尚未执行、供用户核对的新增/修改/删除方案；用户确认后才执行，
  * 提案本身不表示事项已保存或修改成功。提案有意不进 Room（数据库零改动），存 DataStore JSON。
  */
@@ -57,6 +58,11 @@ data class AiProposalTargetRecord(
     val endMillis: Long? = null,
     val location: String = "",
     val timezoneId: String = "",
+    // T22/#23 重复字段（仅待办使用）：目标当前重复规则与出现锚点快照。
+    // 修改/取消重复待办时据此要求并展示「仅本次/本次及以后」范围；
+    // 两者均为 null = 普通待办（无需选择范围）。
+    val recurrence: AiProposalRecurrence? = null,
+    val anchorEpochDay: Long? = null,
 )
 
 /**
@@ -80,6 +86,12 @@ data class AiProposalChanges(
     val startMillis: Long? = null,
     val endMillis: Long? = null,
     val location: String? = null,
+    // T22/#23 重复与子任务变更（仅待办、仅「本次及以后」）：
+    // [recurrence] 为新规则（替换），[clearRecurrence] 为移除重复（与设置新规则互斥），
+    // [addSubTasks] 为追加的子任务步骤模板（不删除既有步骤）。
+    val recurrence: AiProposalRecurrence? = null,
+    val clearRecurrence: Boolean = false,
+    val addSubTasks: List<String> = emptyList(),
 )
 
 /**
@@ -156,7 +168,38 @@ data class AiProposalItem(
     // T28/#29 记忆条目字段（仅 MEMORY 条目使用）：类型为偏好或事实，解析层校验；
     // 记忆原文存 [content]（用户原话不改写），[title] 为展示用摘要（原文截断）。
     val memoryType: String = "FACT",
+    // T22/#23 重复与子任务字段：
+    // - [recurrence]：新增/修改重复规则（确认执行经 RecurrenceUseCases 真实入口落地）；
+    // - [subTasks]：新增待办的子任务步骤模板（确认后经 SubTaskUseCases 逐条创建）；
+    // - [scope]/[occurrenceEpochDay]：修改或取消重复待办时的范围（仅本次/本次及以后）
+    //   与「仅本次」指向的那一次出现日（解析层保证 scope=本次时日期非空）。
+    val recurrence: AiProposalRecurrence? = null,
+    val subTasks: List<String> = emptyList(),
+    val scope: AiProposalScope? = null,
+    val occurrenceEpochDay: Long? = null,
 )
+
+/**
+ * 提案中的重复规则（T22/#23 纯新增）：与领域模型 [RecurrenceRule] 一一对应，
+ * 但以可序列化原语表达（[weekdays] 用 DayOfWeek.name，[exceptions] 用 epochDay），
+ * 因为提案存 DataStore JSON 而非 Room，不直接序列化领域模型。
+ * [exceptions] 为例外日期（仅本次排除该日出现，不改写规则几何）。
+ */
+@Serializable
+data class AiProposalRecurrence(
+    val frequency: String,
+    val intervalDays: Int = 1,
+    val weekdays: List<String> = emptyList(),
+    val monthDay: Int = 1,
+    val exceptions: List<Long> = emptyList(),
+)
+
+/**
+ * 修改或取消重复待办的作用范围（T22/#23）：[THIS_OCCURRENCE] 仅本次（单次延期或跳过），
+ * [THIS_AND_FUTURE] 本次及以后（修改模板/规则，过去记录保持不变）。
+ */
+@Serializable
+enum class AiProposalScope { THIS_OCCURRENCE, THIS_AND_FUTURE }
 
 /**
  * 一次对话产生的操作提案：唯一 [id] + 状态机 + 全部条目。
