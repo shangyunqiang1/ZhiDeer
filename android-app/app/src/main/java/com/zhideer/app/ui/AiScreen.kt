@@ -39,6 +39,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.zhideer.app.domain.model.AdvisorAdoptionOutcome
+import com.zhideer.app.domain.model.AdvisorAdoptionRecord
+import com.zhideer.app.domain.model.AdvisorFeedbackRecord
+import com.zhideer.app.domain.model.AdvisorFeedbackType
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
 import com.zhideer.app.domain.model.AiProposal
@@ -930,13 +934,13 @@ private fun formatMillis(millis: Long): String {
 }
 
 /**
- * 参谋建议面板（T29/#30）：主动生成有依据的参谋建议（GLOSSARY「参谋建议」）。
+ * 参谋建议面板（T29/#30，T30/#31 补齐确认采纳与反馈追溯）：
  * - 仅用户点击「参谋」时生成（首版仅主动触发，无后台自动生成与通知）；
  * - 每条建议展示依据引用（真实记录，可核对）、原因与建议动作；
- * - 「转为操作提案」= 采纳：落 PENDING 提案后在本面板确认执行或忽略（绝不直接写入）；
- *   提醒式建议（明日日程冲突、记忆核对）无提案草稿，按钮不出现；
- * - 未授权记忆类别时说明限制（不产生记忆类建议）；本地规则建议不依赖模型、离线可用；
- * - 参谋产生的提案（sessionId = null）在本面板集中确认；生成与查看建议不修改任何事项。
+ * - 「采纳」先弹出预览（将创建/修改的事项），确认后只生成 PENDING 操作提案，
+ *   仍须在下方提案卡片显式确认执行（绝不直接写入）；
+ * - 采纳执行成功才显示「已采纳」；失败、取消、未知结果都不标已采纳，执行记录可核对；
+ * - 忽略/调整/不再建议反馈保存可追溯，不写长期记忆；提醒类建议无写入、不出现采纳按钮。
  */
 @Composable
 private fun AdvisorPanel(
@@ -950,10 +954,21 @@ private fun AdvisorPanel(
     var message by remember { mutableStateOf<String?>(null) }
     var isMessageError by remember { mutableStateOf(false) }
     var generating by remember { mutableStateOf(false) }
+    var confirmingId by remember { mutableStateOf<String?>(null) }
+    // 采纳前预览（T30/#31：点击采纳先显示将创建或修改的事项）
+    var previewing by remember { mutableStateOf<AdvisorSuggestion?>(null) }
+    // 调整反馈（保存说明，仅追溯，不写长期记忆）
+    var adjusting by remember { mutableStateOf<AdvisorSuggestion?>(null) }
+    var adjustNote by remember { mutableStateOf("") }
     // 参谋产生的提案（含确认后回执）：集中在面板下方确认，走既有提案状态机
     val advisorProposals by advisor.observeAdvisorProposals().collectAsState(initial = emptyList())
     val pendingAdvisorProposals = advisorProposals.filter { it.status == AiProposalStatus.PENDING }
-    var confirmingId by remember { mutableStateOf<String?>(null) }
+    val allFeedback by advisor.observeFeedback().collectAsState(initial = emptyList())
+    val adoptions by advisor.observeAdoptions().collectAsState(initial = emptyList())
+    // 同一建议可能因依据变化产生多条提案：取最新一条（写入顺序即追加顺序）
+    val adoptionBySuggestion = adoptions.groupBy { it.suggestionId }
+        .mapValues { (_, list) -> list.lastOrNull() }
+    val adoptionByProposal = adoptions.associateBy { it.proposalId }
 
     fun regenerate() {
         scope.launch {
@@ -961,6 +976,105 @@ private fun AdvisorPanel(
             message = null
             suggestions = advisor.generateSuggestions()
             generating = false
+        }
+    }
+
+    fun adopt(suggestion: AdvisorSuggestion) {
+        scope.launch {
+            advisor.suggestionToProposal(suggestion)
+                .onSuccess {
+                    isMessageError = false
+                    message = "已生成待确认提案（尚未写入）；请在下方核对将修改的事项后点击「确认执行」。"
+                }
+                .onFailure { e ->
+                    isMessageError = true
+                    message = e.message
+                }
+        }
+    }
+
+    fun ignore(suggestion: AdvisorSuggestion) {
+        scope.launch {
+            advisor.ignoreSuggestion(suggestion)
+                .onSuccess {
+                    isMessageError = false
+                    message = "已忽略该建议并保存反馈（仅用于追溯，不写入长期记忆）。"
+                    regenerate()
+                }
+                .onFailure { e ->
+                    isMessageError = true
+                    message = e.message
+                }
+        }
+    }
+
+    fun neverSuggest(suggestion: AdvisorSuggestion) {
+        scope.launch {
+            advisor.recordFeedback(suggestion, AdvisorFeedbackType.NEVER_SUGGEST)
+                .onSuccess {
+                    isMessageError = false
+                    message = "已保存「不再建议」反馈：该建议不再生成（仅用于追溯，不写入长期记忆）。"
+                    regenerate()
+                }
+                .onFailure { e ->
+                    isMessageError = true
+                    message = e.message
+                }
+        }
+    }
+
+    fun saveAdjustment() {
+        val target = adjusting ?: return
+        scope.launch {
+            advisor.recordFeedback(target, AdvisorFeedbackType.ADJUST, adjustNote)
+                .onSuccess {
+                    isMessageError = false
+                    adjusting = null
+                    adjustNote = ""
+                    message = "调整反馈已保存（仅用于追溯，不会写入长期记忆，也不会直接改事项）。"
+                }
+                .onFailure { e ->
+                    isMessageError = true
+                    message = e.message
+                }
+        }
+    }
+
+    fun confirmProposal(proposal: AiProposal) {
+        confirmingId = proposal.id
+        scope.launch {
+            val outcome = advisor.confirmAdoptedProposal(proposal.id)
+            confirmingId = null
+            outcome
+                .onSuccess { confirmed ->
+                    val adoption = advisor.adoptionFor(proposal.id)
+                    isMessageError = adoption?.outcome != AdvisorAdoptionOutcome.ADOPTED
+                    message = when (adoption?.outcome) {
+                        AdvisorAdoptionOutcome.ADOPTED ->
+                            "已采纳（真实执行成功）：" + (confirmed.resultMessage ?: "已完成，可在事项页核对")
+                        AdvisorAdoptionOutcome.FAILED ->
+                            "未标记已采纳：执行失败，请核对真实记录。${confirmed.resultMessage.orEmpty()}"
+                        else -> confirmed.resultMessage ?: "已执行"
+                    }
+                }
+                .onFailure { e ->
+                    isMessageError = true
+                    message = e.message
+                }
+        }
+    }
+
+    fun cancelProposal(proposal: AiProposal) {
+        scope.launch {
+            advisor.cancelAdoptedProposal(proposal.id)
+                .onSuccess {
+                    isMessageError = false
+                    message = "已取消采纳：未执行任何写入，也不会标记已采纳。"
+                }
+                .onFailure { e ->
+                    isMessageError = true
+                    message = e.message
+                }
         }
     }
 
@@ -973,7 +1087,7 @@ private fun AdvisorPanel(
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "建议由本地真实记录派生（只读，不改动任何事项，不依赖联网）；" +
-                        "采纳会先转为操作提案，确认后才会执行。",
+                        "采纳前会先预览将创建或修改的事项，确认执行后才会写入。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1004,19 +1118,15 @@ private fun AdvisorPanel(
                     list.forEach { suggestion ->
                         AdvisorSuggestionCard(
                             suggestion = suggestion,
-                            onConvert = {
-                                scope.launch {
-                                    advisor.suggestionToProposal(suggestion)
-                                        .onSuccess {
-                                            isMessageError = false
-                                            message = "已转为操作提案（待确认），请在下方核对后确认执行。"
-                                        }
-                                        .onFailure { e ->
-                                            isMessageError = true
-                                            message = e.message
-                                        }
-                                }
+                            feedback = allFeedback.lastOrNull { it.suggestionId == suggestion.id },
+                            adoption = adoptionBySuggestion[suggestion.id],
+                            onAdopt = { previewing = suggestion },
+                            onIgnore = { ignore(suggestion) },
+                            onAdjust = {
+                                adjusting = suggestion
+                                adjustNote = ""
                             },
+                            onNeverSuggest = { neverSuggest(suggestion) },
                         )
                     }
                 }
@@ -1030,7 +1140,7 @@ private fun AdvisorPanel(
                 }
                 if (pendingAdvisorProposals.isNotEmpty()) {
                     Text(
-                        "由参谋建议产生的待确认提案",
+                        "由参谋建议产生的待确认提案（确认执行后才写入）",
                         style = MaterialTheme.typography.labelLarge,
                         modifier = Modifier.padding(top = 12.dp),
                     )
@@ -1039,44 +1149,62 @@ private fun AdvisorPanel(
                             proposal = proposal,
                             zoneId = proposalUseCases.zoneId,
                             busy = confirmingId == proposal.id,
-                            onConfirm = {
-                                confirmingId = proposal.id
-                                scope.launch {
-                                    val outcome = proposalUseCases.confirmProposal(proposal.id)
-                                    confirmingId = null
-                                    outcome
-                                        .onSuccess { confirmed ->
-                                            isMessageError = false
-                                            message = confirmed.resultMessage ?: "已执行"
-                                        }
-                                        .onFailure { e ->
-                                            isMessageError = true
-                                            message = e.message
-                                        }
-                                }
-                            },
-                            onDismiss = {
-                                scope.launch {
-                                    proposalUseCases.dismissProposal(proposal.id)
-                                        .onFailure { e ->
-                                            isMessageError = true
-                                            message = e.message
-                                        }
-                                }
-                            },
+                            adoption = adoptionByProposal[proposal.id],
+                            onConfirm = { confirmProposal(proposal) },
+                            onDismiss = { cancelProposal(proposal) },
                         )
                     }
                 }
-                advisorProposals
-                    .filter { it.status == AiProposalStatus.EXECUTED }
-                    .forEach { proposal ->
+                val finished = advisorProposals.filter { it.status != AiProposalStatus.PENDING }
+                if (finished.isNotEmpty()) {
+                    Text(
+                        "已结束的参谋提案",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    finished.takeLast(5).reversed().forEach { proposal ->
+                        val adoption = adoptionByProposal[proposal.id]
                         Text(
-                            "参谋提案已执行：" + (proposal.resultMessage ?: "结果待核实"),
+                            "· ${proposalStatusLabel(proposal.status)}" +
+                                (adoption?.let { " — " + adoptionOutcomeLabel(it.outcome) } ?: "") +
+                                (proposal.resultMessage?.let { "：" + it } ?: ""),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp),
                         )
                     }
+                }
+                if (adoptions.isNotEmpty()) {
+                    Text(
+                        "采纳执行记录（按提案核对，不重复执行）",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    adoptions.takeLast(5).reversed().forEach { record ->
+                        Text(
+                            "· ${record.title} — ${adoptionOutcomeLabel(record.outcome)}" +
+                                (record.detail.takeIf { it.isNotBlank() }?.let { "：" + it.take(80) } ?: ""),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+                if (allFeedback.isNotEmpty()) {
+                    Text(
+                        "反馈记录（可追溯，不写长期记忆）",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    allFeedback.takeLast(5).reversed().forEach { record ->
+                        Text(
+                            "· ${record.title} — ${feedbackLabel(record)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
@@ -1086,13 +1214,42 @@ private fun AdvisorPanel(
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
+
+    previewing?.let { suggestion ->
+        AdvisorAdoptPreviewDialog(
+            suggestion = suggestion,
+            lines = advisor.adoptionPreview(suggestion),
+            onConfirm = {
+                previewing = null
+                adopt(suggestion)
+            },
+            onDismiss = { previewing = null },
+        )
+    }
+    adjusting?.let { suggestion ->
+        AdvisorAdjustDialog(
+            suggestion = suggestion,
+            note = adjustNote,
+            onNoteChange = { adjustNote = it },
+            onSave = { saveAdjustment() },
+            onDismiss = {
+                adjusting = null
+                adjustNote = ""
+            },
+        )
+    }
 }
 
-/** 单条建议卡片：依据引用（可核对）+ 原因 + 建议动作；有草稿时提供「转为操作提案」。 */
+/** 单条建议卡片：依据引用（可核对）+ 原因 + 反馈/采纳状态 + 建议动作。 */
 @Composable
 private fun AdvisorSuggestionCard(
     suggestion: AdvisorSuggestion,
-    onConvert: () -> Unit,
+    feedback: AdvisorFeedbackRecord?,
+    adoption: AdvisorAdoptionRecord?,
+    onAdopt: () -> Unit,
+    onIgnore: () -> Unit,
+    onAdjust: () -> Unit,
+    onNeverSuggest: () -> Unit,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -1131,21 +1288,132 @@ private fun AdvisorSuggestionCard(
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
             }
-            if (suggestion.proposalDraft.isNotEmpty()) {
-                Button(onClick = onConvert, modifier = Modifier.padding(top = 4.dp)) {
-                    Text("转为操作提案")
+            adoption?.let {
+                Text(
+                    adoptionOutcomeLabel(it.outcome) +
+                        (it.detail.takeIf { detail -> detail.isNotBlank() }?.let { detail -> "：" + detail.take(80) } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (it.outcome == AdvisorAdoptionOutcome.ADOPTED) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            feedback?.let {
+                Text(
+                    "反馈：${feedbackLabel(it)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            Row(modifier = Modifier.padding(top = 4.dp)) {
+                if (suggestion.proposalDraft.isNotEmpty() && adoption?.outcome != AdvisorAdoptionOutcome.ADOPTED) {
+                    Button(onClick = onAdopt, enabled = adoption?.outcome != AdvisorAdoptionOutcome.UNKNOWN) {
+                        Text("采纳（先预览）")
+                    }
+                }
+                OutlinedButton(onClick = onIgnore, modifier = Modifier.padding(start = 8.dp)) {
+                    Text("忽略")
+                }
+                OutlinedButton(onClick = onAdjust, modifier = Modifier.padding(start = 8.dp)) {
+                    Text("调整")
+                }
+                TextButton(onClick = onNeverSuggest, modifier = Modifier.padding(start = 4.dp)) {
+                    Text("不再建议")
                 }
             }
         }
     }
 }
 
-/** 参谋产生的待确认提案行：修改条目预览 + 确认执行/忽略（复用既有提案状态机）。 */
+/** 采纳前预览：显示将创建或修改的事项；确认只生成待确认提案，不立即写入。 */
+@Composable
+private fun AdvisorAdoptPreviewDialog(
+    suggestion: AdvisorSuggestion,
+    lines: List<String>,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("确认采纳建议") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "采纳只会生成待确认的操作提案，不会立即写入；" +
+                        "请在下方提案卡片再次核对并点击「确认执行」后才写入。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    suggestion.title,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                lines.forEach { line ->
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("确认采纳（生成待确认提案）") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 调整反馈对话框：说明只保存为反馈，不写长期记忆、不直接改事项。 */
+@Composable
+private fun AdvisorAdjustDialog(
+    suggestion: AdvisorSuggestion,
+    note: String,
+    onNoteChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("调整建议") },
+        text = {
+            Column {
+                Text(
+                    "${suggestion.title}\n调整说明仅保存为反馈用于追溯：不会写入长期记忆，也不会直接修改事项。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = onNoteChange,
+                    label = { Text("调整说明（必填）") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSave) { Text("保存调整反馈") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 参谋产生的待确认提案行：修改条目预览 + 确认执行/取消（复用既有提案状态机）。 */
 @Composable
 private fun AdvisorProposalRow(
     proposal: AiProposal,
     zoneId: ZoneId,
     busy: Boolean,
+    adoption: AdvisorAdoptionRecord?,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1174,16 +1442,51 @@ private fun AdvisorProposalRow(
                     )
                 }
             }
+            adoption?.let {
+                Text(
+                    "采纳结果：${adoptionOutcomeLabel(it.outcome)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (it.outcome == AdvisorAdoptionOutcome.ADOPTED) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
             if (proposal.status == AiProposalStatus.PENDING) {
                 Row(modifier = Modifier.padding(top = 4.dp)) {
                     Button(onClick = onConfirm, enabled = !busy) {
                         Text(if (busy) "执行中…" else "确认执行")
                     }
                     OutlinedButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.padding(start = 8.dp)) {
-                        Text("忽略")
+                        Text("取消采纳")
                     }
                 }
             }
         }
     }
+}
+
+/** 采纳结果中文文案：只有 ADOPTED 才显示已采纳。 */
+private fun adoptionOutcomeLabel(outcome: AdvisorAdoptionOutcome): String = when (outcome) {
+    AdvisorAdoptionOutcome.ADOPTED -> "已采纳（真实执行成功，可核对记录）"
+    AdvisorAdoptionOutcome.FAILED -> "未采纳（执行失败，请核对真实记录）"
+    AdvisorAdoptionOutcome.CANCELLED -> "未采纳（已取消，未执行写入）"
+    AdvisorAdoptionOutcome.UNKNOWN -> "未采纳（结果待核实，请核对真实记录）"
+    AdvisorAdoptionOutcome.INVALIDATED -> "未采纳（依据已变化，需重新生成建议）"
+}
+
+/** 反馈类型中文文案。 */
+private fun feedbackTypeLabel(type: AdvisorFeedbackType): String = when (type) {
+    AdvisorFeedbackType.IGNORE -> "已忽略"
+    AdvisorFeedbackType.ADJUST -> "已调整"
+    AdvisorFeedbackType.NEVER_SUGGEST -> "不再建议"
+}
+
+/** 反馈记录的可追溯文案：类型 + 调整说明 + 时间（不写长期记忆）。 */
+private fun feedbackLabel(record: AdvisorFeedbackRecord): String = buildString {
+    append(feedbackTypeLabel(record.type))
+    if (record.adjustmentNote.isNotBlank()) append("：").append(record.adjustmentNote)
+    append("（").append(formatMillis(record.createdAt)).append("）")
 }
