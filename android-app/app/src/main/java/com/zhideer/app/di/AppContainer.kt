@@ -57,17 +57,23 @@ import com.zhideer.app.domain.usecase.ReminderUseCases
 import com.zhideer.app.domain.usecase.SubTaskUseCases
 import com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
+import com.zhideer.app.domain.usecase.VoiceInputController
+import com.zhideer.app.domain.usecase.VoicePlaybackController
 import com.zhideer.app.platform.AlarmScheduler
 import com.zhideer.app.platform.AndroidClockLauncher
 import com.zhideer.app.platform.AndroidNotificationPoster
 import com.zhideer.app.platform.AndroidReminderCapabilityProbe
 import com.zhideer.app.platform.AndroidReminderFixLauncher
+import com.zhideer.app.platform.AndroidSpeechInput
+import com.zhideer.app.platform.AndroidSpeechOutput
 import com.zhideer.app.platform.NotificationPoster
 import com.zhideer.app.platform.PlatformAlarmScheduler
 import com.zhideer.app.platform.ReminderCapabilityProbe
 import com.zhideer.app.platform.ReminderDeliveryRecorder
 import com.zhideer.app.platform.ReminderFixLauncher
 import com.zhideer.app.platform.ScheduleLedgerAlarmScheduler
+import com.zhideer.app.platform.SpeechInput
+import com.zhideer.app.platform.SpeechOutput
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -510,4 +516,17 @@ class AppContainer(
             sessionRestorer = { sessions -> aiSessionStore.save(sessions) },
         )
     }
+
+    // —— T23/#24 语音输入与中文播报：纯新增装配 ——
+    // 平台语音能力以可注入接口封装（SpeechInput/SpeechOutput）：生产用系统 SpeechRecognizer /
+    // TextToSpeech，测试用替身验证状态机。识别器与 TTS 引擎随页面退出释放，不常驻监听/占引擎。
+    val speechInput: SpeechInput by lazy { AndroidSpeechInput(appContext) }
+
+    val speechOutput: SpeechOutput by lazy { AndroidSpeechOutput(appContext) }
+
+    // 语音输入状态机：按住→录音中，松手→识别中，结果→已转写（仅草稿，发送仍走既有聊天提案确认）。
+    val voiceInputController: VoiceInputController by lazy { VoiceInputController(speechInput) }
+
+    // 中文播报状态机：默认关闭；可开关、可随时停止；退出页面停止并释放引擎。
+    val voicePlaybackController: VoicePlaybackController by lazy { VoicePlaybackController(speechOutput) }
 }

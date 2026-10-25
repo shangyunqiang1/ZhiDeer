@@ -3,6 +3,8 @@
 
     <!-- T17/#18：AI 对话需要访问 DeepSeek 等服务端点 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- T23/#24：按住说话需要麦克风；拒绝时中文提示并回退键盘，录音只交给系统识别服务、不落盘 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- T10/#11：设备重启后恢复提醒调度 -->
