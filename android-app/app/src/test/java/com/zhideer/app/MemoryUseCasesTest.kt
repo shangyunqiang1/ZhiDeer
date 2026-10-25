@@ -406,6 +406,32 @@ class MemoryUseCasesTest {
     }
 
     @Test
+    fun 聊天确认来源的记忆经数据库往返保持来源与确认状态() = runBlocking {
+        // T28/#29 纯新增：聊天确认保存（操作提案确认后经真实入口，来源 CHAT、写入即已确认）
+        clock.add(millis("2026-10-25", "09:00"))
+        val created = useCases.create(
+            MemoryInput(content = "偏好靠窗座位", type = MemoryType.PREFERENCE),
+            MemorySource.CHAT,
+        ).getOrThrow()
+        assertEquals(MemorySource.CHAT, created.source)
+        assertTrue(created.confirmed)
+        assertTrue(created.enabled)
+        // 手动录入路径零回归：来源仍为手动录入
+        val manual = useCases.create(MemoryInput(content = "手动录入的记忆", type = MemoryType.FACT)).getOrThrow()
+        assertEquals(MemorySource.MANUAL, manual.source)
+
+        // 离线重开：来源字段随行持久化，往返一致（可追溯）
+        db.close()
+        open()
+
+        val readBack = useCases.get(created.id)!!
+        assertEquals(MemorySource.CHAT, readBack.source)
+        assertTrue(readBack.confirmed)
+        assertEquals("偏好靠窗座位", readBack.content)
+        assertEquals(MemorySource.MANUAL, useCases.get(manual.id)!!.source)
+    }
+
+    @Test
     fun 操作不存在的记忆返回中文错误() = runBlocking {
         clock.add(millis("2026-10-25", "09:00"))
 

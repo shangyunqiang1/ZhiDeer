@@ -3,14 +3,84 @@ package com.zhideer.app.domain.model
 import kotlinx.serialization.Serializable
 
 /**
- * AI 操作提案领域模型（T19/#20，T20/#21 扩展日程与提醒）。
- * GLOSSARY「操作提案」：尚未执行、供用户核对的新增方案；用户确认后才执行，
- * 提案本身不表示事项已保存。提案有意不进 Room（数据库零改动），存 DataStore JSON。
+ * AI 操作提案领域模型（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除）。
+ * GLOSSARY「操作提案」：尚未执行、供用户核对的新增/修改/删除方案；用户确认后才执行，
+ * 提案本身不表示事项已保存或修改成功。提案有意不进 Room（数据库零改动），存 DataStore JSON。
  */
 
-/** 提案条目类型：待办、便签或日程（T20/#21 扩展日程）。 */
+/**
+ * 提案条目类型：待办、便签、日程或长期记忆（T20/#21 扩展日程，T28/#29 扩展记忆）。
+ * [MEMORY] 只支持新增（CREATE）：记忆的停用/启用与删除在记忆页面管理，
+ * 聊天总结绝不自动升级为长期记忆（GLOSSARY：聊天历史本身不等于长期记忆）。
+ */
 @Serializable
-enum class AiProposalKind { TASK, NOTE, SCHEDULE }
+enum class AiProposalKind { TASK, NOTE, SCHEDULE, MEMORY }
+
+/**
+ * 提案操作类型（T21/#22 纯新增）：新增、修改或删除既有记录。
+ * 默认 [CREATE] 保证既有持久化提案 JSON 零回归。
+ */
+@Serializable
+enum class AiProposalOp { CREATE, MODIFY, DELETE }
+
+/**
+ * 删除类提案的具体动作（T21/#22 纯新增）。
+ * GLOSSARY：取消待办 ≠ 删除待办——[CANCEL] 保留业务记录并停止其提醒；
+ * [TRASH] 移入回收站（可恢复）。便签与日程只有删除（回收站）语义，没有取消。
+ */
+@Serializable
+enum class AiProposalDeleteAction { CANCEL, TRASH }
+
+/**
+ * 修改提案的目标记录快照（T21/#22 纯新增）：目标定位时从真实仓库只读复制的关键字段
+ * （含 [updatedAt] 一致性指纹）。卡片据此展示「旧值 → 新值」预览；
+ * 确认执行时若当前记录 [updatedAt] 与快照不一致（确认前被手动修改），拒绝覆盖并如实回执。
+ */
+@Serializable
+data class AiProposalTargetRecord(
+    val recordId: String,
+    val title: String,
+    val updatedAt: Long,
+    // 待办字段（其余 kind 为默认值）
+    val note: String = "",
+    val priority: String = "",
+    val category: String = "",
+    val dueEpochDay: Long? = null,
+    val dueAtMillis: Long? = null,
+    val status: String = "",
+    // 便签字段
+    val content: String = "",
+    val tags: List<String> = emptyList(),
+    val items: List<String> = emptyList(),
+    // 日程字段
+    val startMillis: Long? = null,
+    val endMillis: Long? = null,
+    val location: String = "",
+    val timezoneId: String = "",
+)
+
+/**
+ * 修改提案的变更集（T21/#22 纯新增）：null / 缺省字段 = 不改（最小变更，绝不静默清空）；
+ * [clearDue] 表示清空待办截止（与设置新截止互斥）；[completed] 为待办完成/撤销完成变更。
+ * 时间字段已在解析层按创建时区换算为 UTC 毫秒（[dueEpochDay] 日期截止不补时刻）。
+ */
+@Serializable
+data class AiProposalChanges(
+    val title: String? = null,
+    val note: String? = null,
+    val priority: String? = null,
+    val category: String? = null,
+    val dueEpochDay: Long? = null,
+    val dueAtMillis: Long? = null,
+    val clearDue: Boolean = false,
+    val completed: Boolean? = null,
+    val content: String? = null,
+    val tags: List<String>? = null,
+    val items: List<String>? = null,
+    val startMillis: Long? = null,
+    val endMillis: Long? = null,
+    val location: String? = null,
+)
 
 /**
  * 提案状态机：
@@ -42,6 +112,12 @@ data class AiProposalReminderSpec(
 
 /**
  * 提案中的一个条目（GLOSSARY：操作提案的组成部分）。
+ * [op] 区分新增/修改/删除（T21/#22，默认 CREATE 兼容既有 JSON）：
+ * - CREATE：字段即新记录内容；
+ * - MODIFY/DELETE：[kind] 表示目标类型，[title] 为用户提供的定位线索（[targetTitle] 同值），
+ *   [changes] 为修改的变更集（null = 删除），[deleteAction] 为删除动作；
+ *   目标由设备端按线索匹配本地记录：唯一候选自动绑定（[targetRecordId]/[targetRecord]），
+ *   多候选内嵌 [candidates] 供用户在卡片中点选（绝不静默猜测），匹配失败不落提案、中文追问。
  * 待办字段（[note]/[priority]/[category]/[dueEpochDay]/[dueAtMillis]）、便签字段
  * （[content]/[tags]/[items]）与日程字段（[startMillis]/[endMillis]/[location]/[reminders]，T20/#21）
  * 按 [kind] 各取所需；解析层保证互斥与合法性：
@@ -49,7 +125,7 @@ data class AiProposalReminderSpec(
  * - [startMillis]/[endMillis] 日程起止（按创建时区换算的 UTC 毫秒，结束不早于开始）；
  * - [priority] 为归一后的 LOW/NORMAL/HIGH；
  * - 便签 [content] 保留用户原话，解析层不改写。
- * 新增字段均有默认值：既有持久化提案 JSON 与 task/note 协议零回归。
+ * 新增字段均有默认值：既有持久化提案 JSON 与 task/note/schedule 协议零回归。
  */
 @Serializable
 data class AiProposalItem(
@@ -69,12 +145,24 @@ data class AiProposalItem(
     val endMillis: Long? = null,
     val location: String = "",
     val reminders: List<AiProposalReminderSpec> = emptyList(),
+    // T21/#22 修改/删除字段（op=MODIFY/DELETE 时使用，解析层保证合法性）
+    val op: AiProposalOp = AiProposalOp.CREATE,
+    val targetTitle: String = "",
+    val changes: AiProposalChanges? = null,
+    val deleteAction: AiProposalDeleteAction? = null,
+    val candidates: List<AiProposalTargetRecord> = emptyList(),
+    val targetRecordId: String? = null,
+    val targetRecord: AiProposalTargetRecord? = null,
+    // T28/#29 记忆条目字段（仅 MEMORY 条目使用）：类型为偏好或事实，解析层校验；
+    // 记忆原文存 [content]（用户原话不改写），[title] 为展示用摘要（原文截断）。
+    val memoryType: String = "FACT",
 )
 
 /**
  * 一次对话产生的操作提案：唯一 [id] + 状态机 + 全部条目。
  * [sessionId] 关联产生它的聊天会话（新会话时由发送路径生成后回填）；
- * [createdTaskIds]/[createdNoteIds]/[createdScheduleIds]（T20/#21）为确认后经真实用例入口创建的记录标识；
+ * [createdTaskIds]/[createdNoteIds]/[createdScheduleIds]（T20/#21）与 [createdMemoryIds]（T28/#29）
+ * 为确认后经真实用例入口创建的记录标识；
  * [resultMessage] 为执行结果的中文回执（含已创建记录标识；部分失败时如实说明）。
  */
 @Serializable
@@ -87,6 +175,7 @@ data class AiProposal(
     val createdTaskIds: List<String> = emptyList(),
     val createdNoteIds: List<String> = emptyList(),
     val createdScheduleIds: List<String> = emptyList(),
+    val createdMemoryIds: List<String> = emptyList(),
     val resultMessage: String? = null,
 )
 

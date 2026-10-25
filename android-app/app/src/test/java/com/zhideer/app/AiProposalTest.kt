@@ -6,13 +6,17 @@ import com.zhideer.app.data.ai.DeepSeekChatClient
 import com.zhideer.app.data.ai.InMemoryAiConfigStore
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiConfig
+import com.zhideer.app.domain.model.AiProposalDeleteAction
 import com.zhideer.app.domain.model.AiProposalKind
+import com.zhideer.app.domain.model.AiProposalOp
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalStatus
 import com.zhideer.app.domain.model.CalendarEntry
 import com.zhideer.app.domain.model.Note
 import com.zhideer.app.domain.model.Reminder
 import com.zhideer.app.domain.model.ReminderOwner
+import com.zhideer.app.domain.model.TaskPriority
+import com.zhideer.app.domain.model.TaskStatus
 import com.zhideer.app.domain.model.TodoTask
 import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
@@ -20,9 +24,13 @@ import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiContextAuthorizer
+import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiContextSnapshot
+import com.zhideer.app.domain.usecase.AiProposalTargetMatcher
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.proposalChangePreviewLines
+import com.zhideer.app.domain.usecase.proposalDeleteActionText
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
@@ -158,6 +166,12 @@ class AiProposalTest {
             idGen = { "proposal-${idSeq.incrementAndGet()}" },
             now = { clock },
             zoneId = ZONE,
+            // T21/#22 纯新增：修改/删除提案的目标定位（授权门在用例层，匹配器只读仓库）
+            targetMatcher = AiProposalTargetMatcher(
+                tasksRepository = fakeTasks,
+                notesRepository = fakeNotes,
+                calendarRepository = fakeCalendar,
+            ),
         )
     }
 
@@ -1038,6 +1052,443 @@ class AiProposalTest {
         assertEquals(listOf(AiChatRole.USER), session.messages.map { it.role })
     }
 
+    // ---------- 14. 修改与删除提案（T21/#22）：授权门与目标定位 ----------
+
+    private fun authorize(vararg categories: AiContextCategory) {
+        chat.authorizeContext(categories.toSet())
+    }
+
+    private fun targetJson(kind: String, title: String): String =
+        "{\"kind\":\"$kind\",\"title\":\"${escapeJson(title)}\"}"
+
+    /** 模型按协议输出的修改提案 JSON：target 定位线索 + changes 变更集（仅用户要改的字段）。 */
+    private fun modifyJson(targetKind: String, targetTitle: String, changesJson: String): String =
+        "{\"kind\":\"modify\",\"target\":${targetJson(targetKind, targetTitle)},\"changes\":$changesJson}"
+
+    /** 模型按协议输出的删除提案 JSON：action 为 cancel（仅待办）或 trash（缺省 = trash）。 */
+    private fun deleteJson(targetKind: String, targetTitle: String, action: String? = null): String = buildString {
+        append("{\"kind\":\"delete\",\"target\":${targetJson(targetKind, targetTitle)}")
+        if (action != null) append(",\"action\":\"$action\"")
+        append("}")
+    }
+
+    private fun presetTask(
+        id: String,
+        title: String,
+        dueEpochDay: Long? = null,
+        priority: TaskPriority = TaskPriority.NORMAL,
+        note: String = "",
+    ): TodoTask = TodoTask(
+        id = id,
+        title = title,
+        note = note,
+        priority = priority,
+        dueEpochDay = dueEpochDay,
+        dueZoneId = ZONE.id,
+        createdAt = clock,
+        updatedAt = clock,
+    )
+
+    private fun presetNote(id: String, title: String, content: String = ""): Note = Note(
+        id = id,
+        title = title,
+        content = content,
+        createdAt = clock,
+        updatedAt = clock,
+    )
+
+    private fun presetEntry(id: String, title: String, start: String, end: String): CalendarEntry = CalendarEntry(
+        id = id,
+        title = title,
+        startMillis = LocalDateTime.parse(start).atZone(ZONE).toInstant().toEpochMilli(),
+        endMillis = LocalDateTime.parse(end).atZone(ZONE).toInstant().toEpochMilli(),
+        timezoneId = ZONE.id,
+        createdAt = clock,
+        updatedAt = clock,
+    )
+
+    @Test
+    fun 未授权时修改提案被拒绝不读取本地数据且留痕说明() = runBlocking {
+        assertNull(chat.currentContextGrant())
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶", dueEpochDay = LocalDate.parse("2026-10-26").toEpochDay())
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "买牛奶", "{\"dueDate\":\"2026-10-27\"}"))))
+
+        val result = send("把买牛奶的截止改到明天")
+
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue("应提示先授权: $message", message.contains("授权") && message.contains("待办"))
+        assertEquals("未授权时绝不读取本地数据", 0, fakeTasks.queryCount)
+        assertTrue(proposalStore.load().isEmpty())
+        // 会话中留有中文说明（先授权再重试），记录未被修改
+        val session = chat.listSessions().first().single()
+        assertEquals(AiChatRole.ASSISTANT, session.messages.last().role)
+        assertTrue(session.messages.last().content.contains("授权"))
+        assertEquals(LocalDate.parse("2026-10-26").toEpochDay(), fakeTasks.tasks["t1"]!!.dueEpochDay)
+        assertEquals(TaskPriority.NORMAL, fakeTasks.tasks["t1"]!!.priority)
+    }
+
+    @Test
+    fun 类别未授权时修改便签提案被拒且不读取便签数据() = runBlocking {
+        authorize(AiContextCategory.TASKS) // 只授权了待办
+        fakeNotes.notes["n1"] = presetNote("n1", "会议要点")
+        server.enqueue(sseProposal(proposalBlock(modifyJson("note", "会议要点", "{\"content\":\"新正文\"}"))))
+
+        val result = send("把会议要点便签正文改掉")
+
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue("应提示便签类别授权: $message", message.contains("便签") && message.contains("授权"))
+        assertEquals("未授权便签类别时绝不读取便签", 0, fakeNotes.queryCount)
+        assertTrue(proposalStore.load().isEmpty())
+    }
+
+    @Test
+    fun 修改待办提案单候选直连绑定目标_确认后经真实入口生效且回执含旧值新值() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        val oldDay = LocalDate.parse("2026-10-26").toEpochDay()
+        val newDay = LocalDate.parse("2026-10-27").toEpochDay()
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶", dueEpochDay = oldDay, note = "全脂")
+        server.enqueue(
+            sseProposal(
+                proposalBlock(modifyJson("task", "买牛奶", "{\"dueDate\":\"2026-10-27\",\"priority\":\"HIGH\"}")),
+            ),
+        )
+
+        val outcome = send("把买牛奶的截止改到明天，优先级调高").getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val item = outcome.proposal.items.single()
+        assertEquals(AiProposalOp.MODIFY, item.op)
+        assertEquals(AiProposalKind.TASK, item.kind)
+        assertEquals("买牛奶", item.targetTitle)
+        // 单候选直连：目标自动绑定且快照保留旧值（用户可核对）
+        assertEquals("t1", item.targetRecordId)
+        assertEquals(1, item.candidates.size)
+        val boundRecord = requireNotNull(item.targetRecord) { "单候选直连必须绑定目标快照" }
+        assertEquals(oldDay, boundRecord.dueEpochDay)
+        assertEquals("NORMAL", boundRecord.priority)
+        assertTrue("匹配应读取已授权类别的本地数据", fakeTasks.queryCount >= 1)
+        // 确认前绝不写入：目标记录仍是旧值
+        assertEquals(oldDay, fakeTasks.tasks["t1"]!!.dueEpochDay)
+        // 字段预览清晰展示 旧值 → 新值
+        val preview = proposalChangePreviewLines(item, ZONE)
+        assertTrue("预览应含截止旧新值: $preview", preview.any { it.contains("2026-10-26") && it.contains("2026-10-27") })
+        assertTrue("预览应含优先级旧新值: $preview", preview.any { it.contains("普通") && it.contains("高") })
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        assertEquals(AiProposalStatus.EXECUTED, confirmed.status)
+        // 经 TaskUseCases.update 真实入口：同一条记录被修改，未新建
+        val updated = fakeTasks.tasks.values.single()
+        assertEquals("t1", updated.id)
+        assertEquals(newDay, updated.dueEpochDay)
+        assertEquals(TaskPriority.HIGH, updated.priority)
+        assertEquals("未提及的字段保持原值", "全脂", updated.note)
+        assertTrue("修改不产生新建记录", confirmed.createdTaskIds.isEmpty())
+        val receipt = confirmed.resultMessage!!
+        assertTrue("回执应含旧→新截止: $receipt", receipt.contains("2026-10-26") && receipt.contains("2026-10-27"))
+        assertTrue("回执应含记录标识: $receipt", receipt.contains("t1"))
+    }
+
+    @Test
+    fun 修改提案多候选时先点选目标再确认_点选哪条就改哪条() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶")
+        fakeTasks.tasks["t2"] = presetTask("t2", "买牛奶和鸡蛋")
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "买牛奶", "{\"priority\":\"HIGH\"}"))))
+
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val item = outcome.proposal.items.single()
+        assertNull("多候选时绝不自动猜测目标", item.targetRecordId)
+        assertEquals(2, item.candidates.size)
+
+        // 未点选就确认 → 拒绝，绝不静默写入
+        val early = proposals.confirmProposal(outcome.proposal.id)
+        assertTrue("未选择目标不可确认", early.isFailure)
+        assertTrue("应提示先选择目标: ${early.exceptionOrNull()!!.message}", early.exceptionOrNull()!!.message!!.contains("目标"))
+        assertTrue("未确认绝不写入", fakeTasks.tasks.values.none { it.priority == TaskPriority.HIGH })
+
+        // 用户点选第二条：点选哪条就是哪条
+        val selected = proposals.selectProposalTarget(outcome.proposal.id, item.id, "t2").getOrThrow()
+        assertEquals("t2", selected.items.single().targetRecordId)
+        assertEquals("买牛奶和鸡蛋", selected.items.single().targetRecord?.title)
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        assertEquals(TaskPriority.HIGH, fakeTasks.tasks["t2"]!!.priority)
+        assertEquals("未被点选的记录保持不变", TaskPriority.NORMAL, fakeTasks.tasks["t1"]!!.priority)
+        assertTrue(confirmed.resultMessage!!.contains("t2"))
+    }
+
+    @Test
+    fun 点选目标限定在候选之内_不信任候选外的记录标识() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶")
+        fakeTasks.tasks["t2"] = presetTask("t2", "买牛奶和鸡蛋")
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "买牛奶", "{\"priority\":\"HIGH\"}"))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val item = outcome.proposal.items.single()
+
+        val result = proposals.selectProposalTarget(outcome.proposal.id, item.id, "t9-不存在")
+        assertTrue("候选外的记录不可选", result.isFailure)
+        assertTrue(proposals.confirmProposal(outcome.proposal.id).isFailure)
+        assertTrue(fakeTasks.tasks.values.none { it.priority == TaskPriority.HIGH })
+    }
+
+    @Test
+    fun 修改提案匹配不到目标时中文追问且不落任何提案() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "打扫房间")
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "不存在的任务", "{\"priority\":\"HIGH\"}"))))
+
+        val result = send()
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue("应中文提示未找到并追问: $message", message.contains("没有找到") && message.contains("不存在的任务"))
+        assertTrue("匹配失败不落提案", proposalStore.load().isEmpty())
+        // 会话中留有追问说明，不猜不编
+        val session = chat.listSessions().first().single()
+        assertTrue(session.messages.last().content.contains("没有找到"))
+        assertEquals(TaskPriority.NORMAL, fakeTasks.tasks["t1"]!!.priority)
+    }
+
+    @Test
+    fun 候选超过上限时追问更具体的名称且不落提案() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        repeat(6) { i -> fakeTasks.tasks["t$i"] = presetTask("t$i", "周会行动项$i") }
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "周会行动项", "{\"priority\":\"HIGH\"}"))))
+
+        val result = send()
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue("应提示候选过多并追问: $message", message.contains("6") && message.contains("周会行动项"))
+        assertTrue(proposalStore.load().isEmpty())
+        assertTrue(fakeTasks.tasks.values.none { it.priority == TaskPriority.HIGH })
+    }
+
+    @Test
+    fun 删除待办提案确认后进入回收站且回执说明可恢复() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "过期计划")
+        server.enqueue(sseProposal(proposalBlock(deleteJson("task", "过期计划", action = "trash"))))
+
+        val outcome = send("删掉过期计划这个待办").getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val item = outcome.proposal.items.single()
+        assertEquals(AiProposalOp.DELETE, item.op)
+        assertEquals(AiProposalDeleteAction.TRASH, item.deleteAction)
+        assertEquals("单候选直连", "t1", item.targetRecordId)
+        assertNull("确认前未删除", fakeTasks.tasks["t1"]!!.trashedAt)
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        assertNotNull("删除走回收站语义", fakeTasks.tasks["t1"]!!.trashedAt)
+        val receipt = confirmed.resultMessage!!
+        assertTrue("回执应说明移入回收站: $receipt", receipt.contains("回收站"))
+        assertTrue(receipt.contains("t1"))
+    }
+
+    @Test
+    fun 取消待办提案明确标注取消语义_确认后保留记录且不进回收站() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "不再做的计划")
+        server.enqueue(sseProposal(proposalBlock(deleteJson("task", "不再做的计划", action = "cancel"))))
+
+        val outcome = send("取消不再做的计划").getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val item = outcome.proposal.items.single()
+        assertEquals(AiProposalDeleteAction.CANCEL, item.deleteAction)
+        // GLOSSARY：取消待办 ≠ 删除待办 —— 动作文案必须标注"取消"而非删除
+        val actionText = proposalDeleteActionText(item)
+        assertTrue("动作文案应标注取消: $actionText", actionText.contains("取消"))
+        assertFalse("取消不是删除", actionText.contains("回收站"))
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        val task = fakeTasks.tasks["t1"]!!
+        assertEquals(TaskStatus.CANCELLED, task.status)
+        assertNull("取消保留业务记录，不进回收站", task.trashedAt)
+        assertNotNull(task.cancelledAt)
+        val receipt = confirmed.resultMessage!!
+        assertTrue(receipt.contains("已取消"))
+        assertFalse("取消回执不得声称移入回收站", receipt.contains("回收站"))
+    }
+
+    @Test
+    fun 删除便签与日程提案各自走回收站语义() = runBlocking {
+        authorize(AiContextCategory.NOTES, AiContextCategory.SCHEDULE)
+        fakeNotes.notes["n1"] = presetNote("n1", "旧便签")
+        fakeCalendar.entries["e1"] = presetEntry("e1", "旧安排", "2026-10-26T10:00", "2026-10-26T11:00")
+        server.enqueue(
+            sseProposal(
+                proposalBlock(deleteJson("note", "旧便签"), deleteJson("schedule", "旧安排")),
+            ),
+        )
+
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        assertEquals(2, outcome.proposal.items.size)
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        assertNotNull(fakeNotes.notes["n1"]!!.trashedAt)
+        assertNotNull(fakeCalendar.entries["e1"]!!.trashedAt)
+        assertTrue(confirmed.resultMessage!!.contains("回收站"))
+    }
+
+    @Test
+    fun 修改提案重复确认幂等不重复执行() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶")
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "买牛奶", "{\"priority\":\"HIGH\"}"))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val first = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        val updatedAtAfterFirst = fakeTasks.tasks["t1"]!!.updatedAt
+        val second = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(first.resultMessage, second.resultMessage)
+        assertEquals("重复确认不重放修改", updatedAtAfterFirst, fakeTasks.tasks["t1"]!!.updatedAt)
+        assertEquals(1, fakeTasks.tasks.size)
+    }
+
+    @Test
+    fun 确认前目标记录已被手动修改时拒绝覆盖并如实回执() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶")
+        server.enqueue(sseProposal(proposalBlock(modifyJson("task", "买牛奶", "{\"priority\":\"HIGH\"}"))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        // 确认前用户手动改了这条记录（updatedAt 变化）
+        fakeTasks.tasks["t1"] = fakeTasks.tasks["t1"]!!.copy(title = "买牛奶（两箱）", updatedAt = clock + 999)
+
+        val result = proposals.confirmProposal(outcome.proposal.id)
+        assertTrue("提案执行完成（含失败项）", result.isSuccess)
+        val confirmed = result.getOrThrow()
+        val task = fakeTasks.tasks["t1"]!!
+        assertEquals("拒绝覆盖用户手动改动", "买牛奶（两箱）", task.title)
+        assertEquals("未应用提案变更", TaskPriority.NORMAL, task.priority)
+        val receipt = confirmed.resultMessage!!
+        assertTrue("回执应如实说明未执行原因: $receipt", receipt.contains("已被修改"))
+    }
+
+    @Test
+    fun 批量修改多个目标一次确认全部生效() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶", dueEpochDay = 1L)
+        fakeTasks.tasks["t2"] = presetTask("t2", "买鸡蛋")
+        server.enqueue(
+            sseProposal(
+                proposalBlock(
+                    modifyJson("task", "买牛奶", "{\"dueDate\":\"2026-10-27\"}"),
+                    modifyJson("task", "买鸡蛋", "{\"priority\":\"LOW\"}"),
+                ),
+            ),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(LocalDate.parse("2026-10-27").toEpochDay(), fakeTasks.tasks["t1"]!!.dueEpochDay)
+        assertEquals(TaskPriority.LOW, fakeTasks.tasks["t2"]!!.priority)
+        assertTrue(confirmed.resultMessage!!.contains("已执行 2 项"))
+    }
+
+    @Test
+    fun 修改便签与日程提案确认经各自真实入口生效() = runBlocking {
+        authorize(AiContextCategory.NOTES, AiContextCategory.SCHEDULE)
+        fakeNotes.notes["n1"] = presetNote("n1", "会议要点", content = "旧正文")
+        fakeCalendar.entries["e1"] = presetEntry("e1", "项目周会", "2026-10-26T14:00", "2026-10-26T15:30")
+        server.enqueue(
+            sseProposal(
+                proposalBlock(
+                    modifyJson("note", "会议要点", "{\"content\":\"新正文\",\"tags\":[\"工作\"]}"),
+                    modifyJson("schedule", "项目周会", "{\"start\":\"2026-10-27T09:00\",\"end\":\"2026-10-27T10:00\"}"),
+                ),
+            ),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        // 便签经 NoteUseCases.update：标题保持、正文与标签更新
+        val note = fakeNotes.notes["n1"]!!
+        assertEquals("新正文", note.content)
+        assertEquals(listOf("工作"), note.tags)
+        assertEquals("会议要点", note.title)
+        // 日程经 CalendarUseCases.update：时间更新、时区锚定保持
+        val entry = fakeCalendar.entries["e1"]!!
+        assertEquals(LocalDateTime.parse("2026-10-27T09:00").atZone(ZONE).toInstant().toEpochMilli(), entry.startMillis)
+        assertEquals(ZONE.id, entry.timezoneId)
+        assertTrue(confirmed.resultMessage!!.contains("已执行 2 项"))
+    }
+
+    @Test
+    fun 修改提案没有给出任何变更时整批拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(modifyJson("task", "买牛奶", "{}")))
+        assertParseRejected("改一下", "变更")
+    }
+
+    @Test
+    fun 修改待办携带便签专属字段时整批拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(modifyJson("task", "买牛奶", "{\"content\":\"不该有\"}")))
+        assertParseRejected("改一下", "待办")
+    }
+
+    @Test
+    fun 修改日程只给开始不给结束整批拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(modifyJson("schedule", "项目周会", "{\"start\":\"2026-10-27T09:00\"}")))
+        assertParseRejected("改时间", "结束")
+    }
+
+    @Test
+    fun 删除待办缺少动作字段整批拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(deleteJson("task", "买牛奶")))
+        assertParseRejected("处理掉买牛奶", "取消", "删除")
+    }
+
+    @Test
+    fun 便签删除不允许取消动作整批拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(deleteJson("note", "旧便签", action = "cancel")))
+        assertParseRejected("取消便签", "便签")
+    }
+
+    @Test
+    fun 创建条目携带目标或变更字段整批拒绝() = runBlocking {
+        val bad = "{\"kind\":\"task\",\"title\":\"混淆\",\"target\":{\"kind\":\"task\",\"title\":\"x\"}}"
+        enqueueInvalidTwice(proposalBlock(bad))
+        assertParseRejected("建个待办", "target")
+    }
+
+    @Test
+    fun 取消生成时修改提案不产生任何写入() = runBlocking {
+        authorize(AiContextCategory.TASKS)
+        fakeTasks.tasks["t1"] = presetTask("t1", "买牛奶")
+        val trickleBody = buildString {
+            repeat(12) { i -> append("data: {\"choices\":[{\"delta\":{\"content\":\"第${i}句\"}}]}\n\n") }
+        }
+        val respondNormal = AtomicBoolean(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                if (respondNormal.get()) {
+                    sseProposal(proposalBlock(modifyJson("task", "买牛奶", "{\"priority\":\"HIGH\"}")))
+                } else {
+                    MockResponse.Builder()
+                        .code(200)
+                        .addHeader("Content-Type", "text/event-stream")
+                        .body(trickleBody)
+                        .throttleBody(20, 100, TimeUnit.MILLISECONDS)
+                        .build()
+                }
+        }
+
+        val deltas = AtomicInteger(0)
+        val job = launch(Dispatchers.IO) {
+            proposals.sendAndIngest(null, "把买牛奶优先级调高") { _ -> deltas.incrementAndGet() }
+        }
+        withTimeout(15_000) {
+            while (deltas.get() < 1) delay(20)
+        }
+        chat.cancelGeneration()
+        job.join()
+        delay(300)
+
+        assertTrue(proposalStore.load().isEmpty())
+        assertEquals("取消后无任何写入", TaskPriority.NORMAL, fakeTasks.tasks["t1"]!!.priority)
+        val session = chat.listSessions().first().single()
+        assertEquals(listOf(AiChatRole.USER), session.messages.map { it.role })
+    }
+
     // ---------- 替身 ----------
 
     private fun assertNullBut(actual: Any?, expected: Any?) = assertEquals(expected, actual)
@@ -1045,8 +1496,13 @@ class AiProposalTest {
     private class FakeTasksRepository : TasksRepository {
         val tasks = LinkedHashMap<String, TodoTask>()
         var failNextUpsert: String? = null
+        // T21/#22：记录 observeTasks 查询次数，供「未授权不读取本地数据」断言
+        var queryCount: Int = 0
 
-        override fun observeTasks(): Flow<List<TodoTask>> = flowOf(tasks.values.toList())
+        override fun observeTasks(): Flow<List<TodoTask>> {
+            queryCount++
+            return flowOf(tasks.values.toList())
+        }
         override suspend fun getTask(id: String): TodoTask? = tasks[id]
         override suspend fun upsertTask(task: TodoTask) {
             failNextUpsert?.let { msg ->
@@ -1071,8 +1527,13 @@ class AiProposalTest {
 
     private class FakeNotesRepository : NotesRepository {
         val notes = LinkedHashMap<String, Note>()
+        // T21/#22：记录 observeNotes 查询次数，供「未授权不读取本地数据」断言
+        var queryCount: Int = 0
 
-        override fun observeNotes(): Flow<List<Note>> = flowOf(notes.values.toList())
+        override fun observeNotes(): Flow<List<Note>> {
+            queryCount++
+            return flowOf(notes.values.toList())
+        }
         override suspend fun getNote(id: String): Note? = notes[id]
         override suspend fun upsertNote(note: Note) {
             notes[note.id] = note
@@ -1095,9 +1556,13 @@ class AiProposalTest {
     private class FakeCalendarRepository : CalendarRepository {
         val entries = LinkedHashMap<String, CalendarEntry>()
         var failNextUpsert: String? = null
+        // T21/#22：记录 observeEntries 查询次数，供「未授权不读取本地数据」断言
+        var queryCount: Int = 0
 
-        override fun observeEntries(): Flow<List<CalendarEntry>> =
-            flowOf(entries.values.filter { it.trashedAt == null })
+        override fun observeEntries(): Flow<List<CalendarEntry>> {
+            queryCount++
+            return flowOf(entries.values.filter { it.trashedAt == null })
+        }
 
         override suspend fun getEntry(id: String): CalendarEntry? = entries[id]
         override suspend fun getEntriesLinkedToTask(taskId: String): List<CalendarEntry> =

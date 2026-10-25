@@ -3,15 +3,18 @@ package com.zhideer.app.data.ai
 import com.zhideer.app.domain.model.TaskStatus
 import com.zhideer.app.domain.model.TodoTask
 import com.zhideer.app.domain.repository.CalendarRepository
+import com.zhideer.app.domain.repository.MemoriesRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.AiContextGrant
+import com.zhideer.app.domain.usecase.AiContextMemoryRecord
 import com.zhideer.app.domain.usecase.AiContextNoteRecord
 import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiContextScheduleRecord
 import com.zhideer.app.domain.usecase.AiContextSnapshot
 import com.zhideer.app.domain.usecase.AiContextTaskRecord
+import com.zhideer.app.domain.usecase.isActiveAt
 import kotlinx.coroutines.flow.first
 import java.time.Instant
 import java.time.LocalDate
@@ -19,12 +22,14 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
- * 生产快照提供者（T18/#19）：按授权类别从真实仓库只读生成少量相关记录。
+ * 生产快照提供者（T18/#19，T28/#29 扩展记忆段）：按授权类别从真实仓库只读生成少量相关记录。
  * - 只读取 [grant] 中已授权类别的仓库，未授权类别绝不读取（用户故事 63）；
  * - 普通仓库查询已排除回收站，此处仍做 [trashedAt] 防御过滤（用户故事 50：回收站不参与 AI 检索）；
  * - 待办只取已过期未完成、今日到期与未来七天（GLOSSARY：日期截止当天属今日到期，次日属过期）；
  * - 日程取与其锚定时区下「今天起未来七天」窗口相交的记录（跨入窗口的进行中日程也提供）；
  * - 便签取最近保存的少量记录；
+ * - 长期记忆（T28/#29）只取活动记忆（已确认、未停用、未过期），按最近更新倒序取上限条数，
+ *   原文不篡改；停用、过期与未确认内容绝不外发；
  * - 各类别设条数上限，只发送完成请求所需的相关少量内容，不默认发送全部本地数据；
  * - 只读：不产生任何业务写入（模型输出不回写业务数据）。
  */
@@ -34,6 +39,8 @@ class RepositoryAiContextProvider(
     private val notesRepository: NotesRepository,
     private val zoneId: ZoneId,
     private val now: () -> Long,
+    // T28/#29 纯新增：长期记忆仓库（可空默认值保持既有构造零回归；生产装配必须传入）
+    private val memoriesRepository: MemoriesRepository? = null,
 ) : AiContextProvider {
 
     override suspend fun loadSnapshot(grant: AiContextGrant): AiContextSnapshot {
@@ -43,6 +50,7 @@ class RepositoryAiContextProvider(
             tasks = if (grant.contains(AiContextCategory.TASKS)) loadTaskRecords() else emptyList(),
             schedule = if (grant.contains(AiContextCategory.SCHEDULE)) loadScheduleRecords() else emptyList(),
             notes = if (grant.contains(AiContextCategory.NOTES)) loadNoteRecords() else emptyList(),
+            memories = if (grant.contains(AiContextCategory.MEMORY)) loadMemoryRecords() else emptyList(),
         )
     }
 
@@ -140,12 +148,28 @@ class RepositoryAiContextProvider(
             }
             .toList()
 
+    // ---------- 长期记忆（T28/#29） ----------
+
+    /**
+     * 活动记忆记录：仅已确认、未停用、未过期的记忆（[isActiveAt]），按最近更新倒序取上限条数；
+     * 原文原样注入（不篡改、不截断、不扩写）——记忆内容本就是用户确认过的原话。
+     */
+    private suspend fun loadMemoryRecords(): List<AiContextMemoryRecord> =
+        (memoriesRepository?.observeMemories()?.first().orEmpty())
+            .asSequence()
+            .filter { it.isActiveAt(now()) }
+            .sortedByDescending { it.updatedAt }
+            .take(MAX_MEMORIES)
+            .map { memory -> AiContextMemoryRecord(content = memory.content, typeLabel = memory.type.label) }
+            .toList()
+
     private companion object {
         const val DAY_MILLIS = 24 * 3600_000L
         const val SEVEN_DAYS = 7L
         const val MAX_TASKS = 30
         const val MAX_SCHEDULE = 30
         const val MAX_NOTES = 10
+        const val MAX_MEMORIES = 10
         const val NOTE_CONTENT_MAX = 200
 
         val dateFmt: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")

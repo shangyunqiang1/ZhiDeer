@@ -35,6 +35,8 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            // C 盘空间紧张：测试 JVM 原生库解压与临时文件固定到 G 盘
+            all { it.systemProperty("java.io.tmpdir", "G:/ZhiDeer-tools/tmp") }
         }
     }
 }
