@@ -448,6 +448,8 @@ class AppContainer(
             // （确认执行走 RecurrenceUseCases/TaskUseCases/SubTaskUseCases，不另建 AI 路径）
             recurrenceUseCases = recurrenceUseCases,
             subTaskUseCases = subTaskUseCases,
+            // T25/#26 纯新增：系统闹钟提案确认后经既有时钟交接入口（记录待核对，不宣称已保存）
+            clockHandoffUseCases = clockHandoffUseCases,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,

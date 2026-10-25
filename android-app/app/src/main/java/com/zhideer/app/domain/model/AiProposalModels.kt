@@ -10,12 +10,15 @@ import kotlinx.serialization.Serializable
  */
 
 /**
- * 提案条目类型：待办、便签、日程或长期记忆（T20/#21 扩展日程，T28/#29 扩展记忆）。
+ * 提案条目类型：待办、便签、日程、长期记忆或系统闹钟（T20/#21 扩展日程，T28/#29 扩展记忆，
+ * T25/#26 扩展系统闹钟）。
  * [MEMORY] 只支持新增（CREATE）：记忆的停用/启用与删除在记忆页面管理，
  * 聊天总结绝不自动升级为长期记忆（GLOSSARY：聊天历史本身不等于长期记忆）。
+ * [ALARM] 只支持新增（CREATE）：系统闹钟由系统时钟管理，应用无法读取或修改已有闹钟；
+ * 确认后只经 ClockHandoffUseCases 发起交接并保持「待核对」，不创建知时鹿提醒。
  */
 @Serializable
-enum class AiProposalKind { TASK, NOTE, SCHEDULE, MEMORY }
+enum class AiProposalKind { TASK, NOTE, SCHEDULE, MEMORY, ALARM }
 
 /**
  * 提案操作类型（T21/#22 纯新增）：新增、修改或删除既有记录。
@@ -177,6 +180,14 @@ data class AiProposalItem(
     val subTasks: List<String> = emptyList(),
     val scope: AiProposalScope? = null,
     val occurrenceEpochDay: Long? = null,
+    // T25/#26 系统闹钟字段（仅 ALARM 条目使用；解析层保证只出现在新增条目）：
+    // [alarmHour]/[alarmMinute] 为本地响铃时刻；[alarmWeekdays] 为星期规则（1=周一…7=周日，空=仅响一次）；
+    // [alarmEpochDay] 为用户指定的日历日期——平台 SET_ALARM 只接受时分与星期、无法传达日期，
+    // 非空时不得发起交接，必须保留日期并给出「知时鹿提醒/手动打开系统时钟」回退（不静默丢弃日期）。
+    val alarmHour: Int? = null,
+    val alarmMinute: Int? = null,
+    val alarmEpochDay: Long? = null,
+    val alarmWeekdays: List<Int> = emptyList(),
 )
 
 /**
@@ -219,6 +230,9 @@ data class AiProposal(
     val createdNoteIds: List<String> = emptyList(),
     val createdScheduleIds: List<String> = emptyList(),
     val createdMemoryIds: List<String> = emptyList(),
+    // T25/#26：确认后经 ClockHandoffUseCases 发起的系统闹钟交接记录 id。
+    // 只表示「已向系统时钟发起创建请求」，不证明系统闹钟已保存（记录本身保持待核对）。
+    val createdAlarmHandoffIds: List<String> = emptyList(),
     val resultMessage: String? = null,
     // T30/#31 纯新增：真实执行是否全部成功（成功才标记采纳；失败/部分失败不标记）。
     // 可空以兼容既有持久化提案 JSON：旧提案按回执文本判断（见 AdvisorUseCases）。

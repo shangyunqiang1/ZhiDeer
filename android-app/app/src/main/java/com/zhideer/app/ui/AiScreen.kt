@@ -68,6 +68,7 @@ import com.zhideer.app.domain.model.AiProposalOp
 import com.zhideer.app.domain.model.AiProposalScope
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalStatus
+import com.zhideer.app.domain.model.ClockCapability
 import com.zhideer.app.domain.usecase.AdvisorSuggestion
 import com.zhideer.app.domain.usecase.AdvisorSuggestionKind
 import com.zhideer.app.domain.usecase.AdvisorUseCases
@@ -82,6 +83,7 @@ import com.zhideer.app.domain.usecase.VoicePlaybackController
 import com.zhideer.app.domain.usecase.VoicePlaybackState
 import com.zhideer.app.domain.usecase.kindCn
 import com.zhideer.app.domain.usecase.memoryTypeCn
+import com.zhideer.app.domain.usecase.proposalAlarmDetailLines
 import com.zhideer.app.domain.usecase.proposalChangePreviewLines
 import com.zhideer.app.domain.usecase.proposalDeleteActionText
 import com.zhideer.app.domain.usecase.proposalDueText
@@ -141,6 +143,8 @@ fun AiScreen(
     val sessions by useCases.listSessions().collectAsState(initial = emptyList())
     // 提案（#20）：卡片渲染按当前会话过滤
     val allProposals by proposalUseCases.observeProposals().collectAsState(initial = emptyList())
+    // T25/#26：系统时钟能力随提案刷新；不可用时卡片明确禁用发起并给回退，不假装可用
+    val clockCapability = remember(allProposals) { proposalUseCases.clockCapability() }
     // 授权状态（#19）：会话级、内存保存；null = 未授权
     val grant by useCases.observeContextGrant().collectAsState(initial = useCases.currentContextGrant())
     var chatSessionId by remember { mutableStateOf<String?>(null) } // null=列表页；""=新会话；其他=既有会话
@@ -319,6 +323,14 @@ fun AiScreen(
                             .onFailure { e -> error = e.message }
                     }
                 },
+                // T25/#26：回退选项②——打开系统时钟手动核对/设置（不写交接记录、不创建提醒）
+                clockCapability = clockCapability,
+                onOpenClock = {
+                    scope.launch {
+                        error = null
+                        proposalUseCases.openSystemClock().onFailure { e -> error = e.message }
+                    }
+                },
                 voiceInput = voiceInput,
                 voicePlayback = voicePlayback,
                 modifier = Modifier.fillMaxSize().padding(padding),
@@ -420,6 +432,9 @@ private fun ChatView(
     onRemoveProposalItem: (String, String) -> Unit,
     onSelectProposalTarget: (String, String, String) -> Unit,
     onSelectProposalScope: (String, String, AiProposalScope) -> Unit,
+    // T25/#26：系统闹钟卡片依赖的时钟能力与回退入口
+    clockCapability: ClockCapability?,
+    onOpenClock: () -> Unit,
     // T23/#24：语音输入与中文播报由状态机控制器承载，UI 只渲染状态与转发事件
     voiceInput: VoiceInputController,
     voicePlayback: VoicePlaybackController,
@@ -510,6 +525,8 @@ private fun ChatView(
                     onSelectScope = { itemId, scope ->
                         onSelectProposalScope(proposal.id, itemId, scope)
                     },
+                    clockCapability = clockCapability,
+                    onOpenClock = onOpenClock,
                 )
             }
             if (generating && streamingText != null) {
@@ -937,6 +954,8 @@ private fun AiContextPanel(
  * 修改条目逐字段展示「旧值 → 新值」，删除条目明确取消/删除语义（GLOSSARY：取消待办≠删除）；
  * 多候选修改/删除条目列出候选供点选（点选哪条就是哪条，未点选不可确认）；EXECUTED 显示含记录标识的
  * 中文回执；CONFIRMED 显示结果待核实；EXPIRED 不残留可执行操作。
+ * T25/#26：系统闹钟条目展示来源/核对边界与指定日期限制；若全部闹钟条目都无法真正发起
+ * （无处理器/指定日期/入口未装配），禁用确认并保留回退入口，绝不把「无法发起」伪装成已执行。
  */
 @Composable
 private fun ProposalCard(
@@ -948,12 +967,18 @@ private fun ProposalCard(
     onRemoveItem: (String) -> Unit,
     onSelectTarget: (itemId: String, recordId: String) -> Unit,
     onSelectScope: (itemId: String, scope: AiProposalScope) -> Unit,
+    clockCapability: ClockCapability?,
+    onOpenClock: () -> Unit,
 ) {
     // T21/#22：含修改/删除条目时按钮文案与语义不同；有条目未点选目标时禁止确认（用例层同样拦截）
     val hasModifyDelete = proposal.items.any { it.op != AiProposalOp.CREATE }
     val pendingSelection = proposal.items.any { it.op != AiProposalOp.CREATE && it.targetRecordId == null }
     // T22/#23：重复待办的修改/取消必须先选择范围（仅本次或本次及以后）才能确认
     val pendingScope = proposal.items.any { proposalNeedsScope(it) && it.scope == null }
+    // T25/#26：纯系统闹钟提案且没有任何一条可真正发起时禁用确认（指定日期无法传达、平台无处理器）
+    val clockBlocked = proposal.items.isNotEmpty() &&
+        proposal.items.all { it.kind == AiProposalKind.ALARM } &&
+        proposal.items.none { it.alarmEpochDay == null && clockCapability?.canCreateAlarm == true }
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = MaterialTheme.shapes.medium,
@@ -981,6 +1006,8 @@ private fun ProposalCard(
                     onRemove = { onRemoveItem(item.id) },
                     onSelectTarget = { recordId -> onSelectTarget(item.id, recordId) },
                     onSelectScope = { scope -> onSelectScope(item.id, scope) },
+                    clockCapability = clockCapability,
+                    onOpenClock = onOpenClock,
                 )
             }
             proposal.resultMessage?.let { receipt ->
@@ -1008,8 +1035,20 @@ private fun ProposalCard(
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
+                if (clockBlocked) {
+                    Text(
+                        "系统时钟不可发起：当前系统没有可用的时钟应用，或本条指定了无法传达的日历日期。" +
+                            "已禁用确认；可使用条目上的「打开系统时钟手动设置」或在知时鹿创建通知提醒。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 Row(modifier = Modifier.padding(top = 8.dp)) {
-                    Button(onClick = onConfirm, enabled = !busy && !pendingSelection && !pendingScope) {
+                    Button(
+                        onClick = onConfirm,
+                        enabled = !busy && !pendingSelection && !pendingScope && !clockBlocked,
+                    ) {
                         Text(
                             when {
                                 busy -> if (hasModifyDelete) "执行中…" else "创建中…"
@@ -1051,6 +1090,8 @@ private fun ProposalItemRow(
     onRemove: () -> Unit,
     onSelectTarget: (recordId: String) -> Unit,
     onSelectScope: (AiProposalScope) -> Unit,
+    clockCapability: ClockCapability?,
+    onOpenClock: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1130,6 +1171,8 @@ private fun ProposalItemRow(
                         add("类型：${memoryTypeCn(item.memoryType)}")
                         if (item.content.isNotBlank()) add("内容：${item.content}")
                     }
+                    // T25/#26 系统闹钟：确定时间/重复规则、来源与核对边界、指定日期限制与回退
+                    AiProposalKind.ALARM -> addAll(proposalAlarmDetailLines(item))
                 }
                 // T21/#22：修改逐字段「旧值 → 新值」；删除明确取消/删除语义与去向
                 AiProposalOp.MODIFY -> addAll(proposalChangePreviewLines(item, zoneId))
@@ -1142,6 +1185,34 @@ private fun ProposalItemRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
+        }
+        // T25/#26 系统闹钟：能力不可用或指定日期时明确「不发起」，并提供手动打开系统时钟回退
+        if (item.op == AiProposalOp.CREATE && item.kind == AiProposalKind.ALARM) {
+            val blockedReason = when {
+                clockCapability == null -> "系统时钟交接入口未配置：确认不会发起跳转。"
+                clockCapability.canCreateAlarm -> null
+                else -> "当前系统没有可用的时钟应用：已禁用发起，可打开系统时钟或改用知时鹿提醒。"
+            }
+            blockedReason?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            if (item.alarmEpochDay != null) {
+                Text(
+                    "指定日期条目不会发起系统时钟跳转（避免丢日期）：请改用知时鹿通知提醒，" +
+                        "或打开系统时钟手动选择日期。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            OutlinedButton(
+                onClick = onOpenClock,
+                enabled = clockCapability?.canOpenAlarmList == true,
+                modifier = Modifier.padding(top = 4.dp),
+            ) { Text("打开系统时钟手动设置") }
         }
         // T22/#23：重复待办的修改/取消必须选择范围；仅本次只支持单次延期，其余须本次及以后
         if (proposalNeedsScope(item)) {
