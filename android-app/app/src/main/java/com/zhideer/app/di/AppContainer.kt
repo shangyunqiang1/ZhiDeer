@@ -33,6 +33,7 @@ import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiProposalTargetMatcher
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.AdvisorUseCases
 import com.zhideer.app.domain.usecase.BackupUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
@@ -323,6 +324,24 @@ class AppContainer(
             targetMatcher = aiProposalTargetMatcher,
             // T28/#29 纯新增：记忆提案确认后经长期记忆真实入口保存（来源聊天确认）
             memoryUseCases = memoryUseCases,
+            idGen = { UUID.randomUUID().toString() },
+            now = nowMillis,
+            zoneId = zoneId,
+        )
+    }
+
+    // —— T29/#30 参谋建议：纯新增装配 ——
+    // 本地规则引擎从真实仓库只读派生有依据的建议（离线可用，不依赖模型）；
+    // 采纳 = suggestionToProposal 落 PENDING 操作提案（sessionId = null），
+    // 此后完全复用既有提案状态机（aiProposalUseCases.confirmProposal 确认执行）。
+    // 生成与查看建议绝不写业务仓库；记忆类建议仅在 MEMORY 类别授权后读取活动记忆。
+    val advisorUseCases: AdvisorUseCases by lazy {
+        AdvisorUseCases(
+            taskUseCases = taskUseCases,
+            calendarUseCases = calendarUseCases,
+            memoryUseCases = memoryUseCases,
+            authorizer = aiContextAuthorizer,
+            proposalStore = aiProposalStore,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,

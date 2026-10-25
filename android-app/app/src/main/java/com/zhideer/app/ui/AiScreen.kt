@@ -48,9 +48,13 @@ import com.zhideer.app.domain.model.AiProposalKind
 import com.zhideer.app.domain.model.AiProposalOp
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalStatus
+import com.zhideer.app.domain.usecase.AdvisorSuggestion
+import com.zhideer.app.domain.usecase.AdvisorSuggestionKind
+import com.zhideer.app.domain.usecase.AdvisorUseCases
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiConfigInput
 import com.zhideer.app.domain.usecase.AiContextCategory
+import com.zhideer.app.domain.usecase.AiContextGrant
 import com.zhideer.app.domain.usecase.AiProposalUseCases
 import com.zhideer.app.domain.usecase.kindCn
 import com.zhideer.app.domain.usecase.memoryTypeCn
@@ -89,7 +93,12 @@ private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
+fun AiScreen(
+    useCases: AiChatUseCases,
+    proposalUseCases: AiProposalUseCases,
+    // T29/#30 纯新增：参谋建议入口（主动生成有依据的建议，采纳走既有提案状态机）
+    advisorUseCases: AdvisorUseCases,
+) {
     val scope = rememberCoroutineScope()
     val sessions by useCases.listSessions().collectAsState(initial = emptyList())
     // 提案（#20）：卡片渲染按当前会话过滤
@@ -104,6 +113,8 @@ fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
     var error by remember { mutableStateOf<String?>(null) }
     var showConfig by remember { mutableStateOf(false) }
     var showAuth by remember { mutableStateOf(false) }
+    // T29/#30：参谋建议面板（主动触发，无后台自动生成）
+    var showAdvisor by remember { mutableStateOf(false) }
     // #20：创建模式开关——开启时发送走提案路径（AI 起草提案，确认后创建）
     var createMode by remember { mutableStateOf(false) }
     // #20：正在确认中的提案 id（确认按钮防重）
@@ -124,6 +135,7 @@ fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
                     }
                 },
                 actions = {
+                    TextButton(onClick = { showAdvisor = true }) { Text("参谋") }
                     TextButton(onClick = { showAuth = true }) { Text("授权") }
                     TextButton(onClick = { showConfig = true }) { Text("设置") }
                 },
@@ -271,6 +283,15 @@ fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
         AiContextPanel(
             useCases = useCases,
             onDismiss = { showAuth = false },
+        )
+    }
+
+    if (showAdvisor) {
+        AdvisorPanel(
+            advisor = advisorUseCases,
+            proposalUseCases = proposalUseCases,
+            grant = grant,
+            onDismiss = { showAdvisor = false },
         )
     }
 }
@@ -906,4 +927,263 @@ private fun priorityCn(priority: String): String = when (priority) {
 private fun formatMillis(millis: Long): String {
     val zoned = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault())
     return zoned.format(aiTimeFmt)
+}
+
+/**
+ * 参谋建议面板（T29/#30）：主动生成有依据的参谋建议（GLOSSARY「参谋建议」）。
+ * - 仅用户点击「参谋」时生成（首版仅主动触发，无后台自动生成与通知）；
+ * - 每条建议展示依据引用（真实记录，可核对）、原因与建议动作；
+ * - 「转为操作提案」= 采纳：落 PENDING 提案后在本面板确认执行或忽略（绝不直接写入）；
+ *   提醒式建议（明日日程冲突、记忆核对）无提案草稿，按钮不出现；
+ * - 未授权记忆类别时说明限制（不产生记忆类建议）；本地规则建议不依赖模型、离线可用；
+ * - 参谋产生的提案（sessionId = null）在本面板集中确认；生成与查看建议不修改任何事项。
+ */
+@Composable
+private fun AdvisorPanel(
+    advisor: AdvisorUseCases,
+    proposalUseCases: AiProposalUseCases,
+    grant: AiContextGrant?,
+    onDismiss: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var suggestions by remember { mutableStateOf<List<AdvisorSuggestion>?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var isMessageError by remember { mutableStateOf(false) }
+    var generating by remember { mutableStateOf(false) }
+    // 参谋产生的提案（含确认后回执）：集中在面板下方确认，走既有提案状态机
+    val advisorProposals by advisor.observeAdvisorProposals().collectAsState(initial = emptyList())
+    val pendingAdvisorProposals = advisorProposals.filter { it.status == AiProposalStatus.PENDING }
+    var confirmingId by remember { mutableStateOf<String?>(null) }
+
+    fun regenerate() {
+        scope.launch {
+            generating = true
+            message = null
+            suggestions = advisor.generateSuggestions()
+            generating = false
+        }
+    }
+
+    LaunchedEffect(Unit) { regenerate() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("参谋建议") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "建议由本地真实记录派生（只读，不改动任何事项，不依赖联网）；" +
+                        "采纳会先转为操作提案，确认后才会执行。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (grant == null || !grant.contains(AiContextCategory.MEMORY)) {
+                    Text(
+                        "未授权「记忆」类别：不会读取或使用你的长期记忆，记忆偏好类建议不会生成；" +
+                            "可在「授权」面板开启。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                if (generating) {
+                    Text(
+                        "正在根据真实记录生成建议…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                suggestions?.let { list ->
+                    if (!generating && list.isEmpty()) {
+                        Text(
+                            "当前没有需要参谋介入的事项：没有过期待办、明日日程冲突或久未核对的记忆。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    list.forEach { suggestion ->
+                        AdvisorSuggestionCard(
+                            suggestion = suggestion,
+                            onConvert = {
+                                scope.launch {
+                                    advisor.suggestionToProposal(suggestion)
+                                        .onSuccess {
+                                            isMessageError = false
+                                            message = "已转为操作提案（待确认），请在下方核对后确认执行。"
+                                        }
+                                        .onFailure { e ->
+                                            isMessageError = true
+                                            message = e.message
+                                        }
+                                }
+                            },
+                        )
+                    }
+                }
+                message?.let {
+                    Text(
+                        it,
+                        color = if (isMessageError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                if (pendingAdvisorProposals.isNotEmpty()) {
+                    Text(
+                        "由参谋建议产生的待确认提案",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    pendingAdvisorProposals.forEach { proposal ->
+                        AdvisorProposalRow(
+                            proposal = proposal,
+                            zoneId = proposalUseCases.zoneId,
+                            busy = confirmingId == proposal.id,
+                            onConfirm = {
+                                confirmingId = proposal.id
+                                scope.launch {
+                                    val outcome = proposalUseCases.confirmProposal(proposal.id)
+                                    confirmingId = null
+                                    outcome
+                                        .onSuccess { confirmed ->
+                                            isMessageError = false
+                                            message = confirmed.resultMessage ?: "已执行"
+                                        }
+                                        .onFailure { e ->
+                                            isMessageError = true
+                                            message = e.message
+                                        }
+                                }
+                            },
+                            onDismiss = {
+                                scope.launch {
+                                    proposalUseCases.dismissProposal(proposal.id)
+                                        .onFailure { e ->
+                                            isMessageError = true
+                                            message = e.message
+                                        }
+                                }
+                            },
+                        )
+                    }
+                }
+                advisorProposals
+                    .filter { it.status == AiProposalStatus.EXECUTED }
+                    .forEach { proposal ->
+                        Text(
+                            "参谋提案已执行：" + (proposal.resultMessage ?: "结果待核实"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { regenerate() }, enabled = !generating) { Text("重新生成") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+/** 单条建议卡片：依据引用（可核对）+ 原因 + 建议动作；有草稿时提供「转为操作提案」。 */
+@Composable
+private fun AdvisorSuggestionCard(
+    suggestion: AdvisorSuggestion,
+    onConvert: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "[${suggestion.kind.label}]",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    suggestion.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                )
+            }
+            Text(
+                suggestion.reason,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            Text(
+                "依据（可到对应页面核对）：",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            suggestion.evidence.forEach { evidence ->
+                Text(
+                    "· [${kindCn(evidence.recordKind)}] ${evidence.title} — ${evidence.detail}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+            if (suggestion.proposalDraft.isNotEmpty()) {
+                Button(onClick = onConvert, modifier = Modifier.padding(top = 4.dp)) {
+                    Text("转为操作提案")
+                }
+            }
+        }
+    }
+}
+
+/** 参谋产生的待确认提案行：修改条目预览 + 确认执行/忽略（复用既有提案状态机）。 */
+@Composable
+private fun AdvisorProposalRow(
+    proposal: AiProposal,
+    zoneId: ZoneId,
+    busy: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+    ) {
+        Column(Modifier.padding(8.dp)) {
+            Text(
+                "操作提案（${proposalStatusLabel(proposal.status)}）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            proposal.items.forEach { item ->
+                Text(
+                    "${proposalItemLabel(item)} ${item.targetRecord?.title ?: item.title}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                proposalChangePreviewLines(item, zoneId).forEach { line ->
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (proposal.status == AiProposalStatus.PENDING) {
+                Row(modifier = Modifier.padding(top = 4.dp)) {
+                    Button(onClick = onConfirm, enabled = !busy) {
+                        Text(if (busy) "执行中…" else "确认执行")
+                    }
+                    OutlinedButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.padding(start = 8.dp)) {
+                        Text("忽略")
+                    }
+                }
+            }
+        }
+    }
 }
