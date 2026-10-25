@@ -176,8 +176,9 @@ fun ReminderStatusScreen(
         }
 
         Text(
-            "如实说明：提醒“已调度”不等于“已投递”。ColorOS 15 锁屏待机实测仍可能出现 2–4 分钟投递窗口；" +
-                "本应用无法保证所有机型、所有省电设置下精确到秒，也不会在无法保证时假装准时。",
+            "如实说明：提醒“已调度”不等于“已投递”。OPPO Reno10（ColorOS 15）实测锁屏待机投递延迟 " +
+                "30 秒～2 分 31 秒，省电模式下曾达 6 分 13 秒；本应用无法保证所有机型、所有省电设置下精确到秒，" +
+                "也不会在无法保证时假装准时。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(bottom = 16.dp),
