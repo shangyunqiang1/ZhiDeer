@@ -666,6 +666,8 @@ class AdvisorAdoptionUseCasesTest {
             flowOf(emptyList())
 
         override suspend fun listByEntry(entryId: String): List<com.zhideer.app.domain.model.Reminder> = emptyList()
+        // T10/#11 新增：设备变化恢复需要全部日程提醒；本测试不涉及恢复，返回空表。
+        override suspend fun listAll(): List<com.zhideer.app.domain.model.Reminder> = emptyList()
         override suspend fun get(id: String): com.zhideer.app.domain.model.Reminder? = null
         override suspend fun upsert(reminder: com.zhideer.app.domain.model.Reminder) =
             throw UnsupportedOperationException("本测试不应写提醒")
@@ -676,12 +678,21 @@ class AdvisorAdoptionUseCasesTest {
 
     private class NoopAlarmScheduler : com.zhideer.app.platform.AlarmScheduler {
         override fun canScheduleExact(): Boolean = false
-        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
-            throw UnsupportedOperationException("本测试不应调度提醒")
+        override suspend fun scheduleExact(
+            reminderId: String,
+            triggerAtMillis: Long,
+            taskId: String,
+            title: String,
+        ): Boolean = throw UnsupportedOperationException("本测试不应调度提醒")
 
-        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
-            throw UnsupportedOperationException("本测试不应调度提醒")
+        override suspend fun scheduleInexact(
+            reminderId: String,
+            triggerAtMillis: Long,
+            taskId: String,
+            title: String,
+        ): Boolean = throw UnsupportedOperationException("本测试不应调度提醒")
 
-        override fun cancel(reminderId: String) = throw UnsupportedOperationException("本测试不应取消提醒")
+        override suspend fun cancel(reminderId: String) =
+            throw UnsupportedOperationException("本测试不应取消提醒")
     }
 }
