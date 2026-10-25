@@ -60,7 +60,13 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
-                Tab.TASKS -> TasksScreen(useCases = container.taskUseCases, zoneId = container.zoneId)
+                Tab.TASKS -> TasksScreen(
+                    useCases = container.taskUseCases,
+                    zoneId = container.zoneId,
+                    subTaskUseCases = container.subTaskUseCases,
+                    linkUseCases = container.taskScheduleLinkUseCases,
+                    calendarUseCases = container.calendarUseCases,
+                )
                 Tab.CALENDAR -> CalendarScreen(useCases = container.calendarUseCases, deviceZone = ZoneId.systemDefault())
                 Tab.NOTES -> NotesScreen(useCases = container.noteUseCases)
             }
