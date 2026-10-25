@@ -6,12 +6,15 @@ import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.zhideer.app.data.db.ZhiDeerDatabase
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
+import com.zhideer.app.data.repository.SubTasksRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
+import com.zhideer.app.domain.repository.SubTasksRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
+import com.zhideer.app.domain.usecase.SubTaskUseCases
 import com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
 import kotlinx.coroutines.Dispatchers
@@ -35,8 +38,8 @@ class AppContainer(
     )
         .setDriver(BundledSQLiteDriver())
         .setQueryCoroutineContext(Dispatchers.IO)
-        // T04/#5 与 T05/#6 合并后数据库为 1→2→3（日程表 + 便签表），T06/#7 升到 4（日程外键 taskId）。
-        // 当前应用尚无对外发布的真实用户数据，暂以破坏性迁移兜底（旧库重建，不保留历史数据）；
+        // T06/#7（日程外键 taskId）与 T07/#8（sub_tasks 子任务表）合并后数据库升至 5。当前应用尚无对外发布的
+        // 真实用户数据，暂以破坏性迁移兜底（旧库重建，不保留历史数据）；
         // 接入真实用户数据前必须替换为保留数据的正式迁移。
         .fallbackToDestructiveMigration()
         .build()
@@ -45,11 +48,23 @@ class AppContainer(
 
     val tasksRepository: TasksRepository = TasksRepositoryImpl(database.taskDao(), Dispatchers.IO)
 
+    val subTasksRepository: SubTasksRepository = SubTasksRepositoryImpl(database.subTaskDao(), Dispatchers.IO)
+
+    // 子任务用例先于待办用例组装，供待办删除时的子任务联动钩子引用（#8）。
+    val subTaskUseCases: SubTaskUseCases = SubTaskUseCases(
+        repository = subTasksRepository,
+        tasksRepository = tasksRepository,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
+    )
+
     val taskUseCases: TaskUseCases = TaskUseCases(
         repository = tasksRepository,
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
         zoneId = zoneId.id,
+        // #8：父待办进入回收站时子任务联动删除，保留父子关系供恢复
+        onTrashed = { taskId -> subTaskUseCases.trashForParent(taskId) },
     )
 
     val calendarRepository: CalendarRepository = CalendarRepositoryImpl(database.calendarEntryDao(), Dispatchers.IO)
