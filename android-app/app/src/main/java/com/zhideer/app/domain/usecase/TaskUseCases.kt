@@ -166,8 +166,9 @@ class TaskUseCases(
     suspend fun get(id: String): TodoTask? = repository.getTask(id)
 
     /**
-     * 过滤查询。T12/#13 纯新增重复分支：重复待办依据重复规则与各次完成记录
+     * 过滤查询。T12/#13 纯新增重复分支：重复待办依据重复规则与各次出现记录
      * 合成“下一次未完成出现”状态后判定（错过不自动完成、不静默消失）；
+     * T14/#15 起按出现记录生效日驱动（含单次延期行）；
      * 非重复待办判定与既有行为完全一致。
      */
     fun observe(filter: TaskFilter): Flow<List<TodoTask>> {
@@ -176,13 +177,11 @@ class TaskUseCases(
                 tasks.filter { TaskDue.matches(it, filter, now()) }
             }
         return combine(repository.observeTasks(), occurrenceRepo.observeAll()) { tasks, occurrences ->
-            val completedDaysByTask = occurrences.filter { it.completed }
-                .groupBy { it.taskId }
-                .mapValues { (_, rows) -> rows.map { it.occurrenceEpochDay }.toSet() }
+            val rowsByTask = occurrences.groupBy { it.taskId }
             tasks.filter { task ->
                 val recurring = RecurrenceUseCases.recurringState(
                     task,
-                    completedDaysByTask[task.id] ?: emptySet(),
+                    rowsByTask[task.id] ?: emptyList(),
                     now(),
                 )
                 TaskDue.matches(task, filter, now(), recurring)
@@ -190,7 +189,7 @@ class TaskUseCases(
         }
     }
 
-    /** 重复待办的完成/撤销转发到出现维度：完成代表次（下一次未完成出现）。 */
+    /** 重复待办的完成/撤销转发到出现维度：完成下一次未完成出现的生效日（最早一次，含延期行）。 */
     private suspend fun completeRecurringOccurrence(
         task: TodoTask,
         occurrenceRepo: TaskOccurrenceRepository,
@@ -201,23 +200,27 @@ class TaskUseCases(
         }
         val t = now()
         if (completed) {
-            val completedDays = occurrenceRepo.listByTask(task.id)
-                .filter { it.completed }
-                .map { it.occurrenceEpochDay }
-                .toSet()
+            val rows = occurrenceRepo.listByTask(task.id)
             val next = RecurrenceUseCases.nextUnfinishedDay(
                 task,
-                completedDays,
+                rows,
                 TaskDue.todayEpochDay(task.dueZoneId, t),
             )
+            // 该生效日最早未完成的出现（同日两次按原始日先后分别完成）
+            val target = rows
+                .filter { it.effectiveEpochDay == next && !it.completed }
+                .minByOrNull { it.originalEpochDay }
             occurrenceRepo.upsert(
-                TaskOccurrence(
-                    taskId = task.id,
-                    occurrenceEpochDay = next,
-                    completed = true,
-                    completedAt = t,
-                    updatedAt = t,
-                ),
+                target?.copy(completed = true, completedAt = t, updatedAt = t)
+                    ?: TaskOccurrence(
+                        id = idGen(),
+                        taskId = task.id,
+                        originalEpochDay = next,
+                        effectiveEpochDay = next,
+                        completed = true,
+                        completedAt = t,
+                        updatedAt = t,
+                    ),
             )
         } else {
             // 撤销最近一次已完成的出现；没有则原样返回（幂等）

@@ -25,7 +25,7 @@ class TaskOccurrenceRepositoryImpl(
         dao.listByTask(taskId).map { it.toModel() }
     }
 
-    /** 主键 (taskId, occurrenceEpochDay) 幂等写入。 */
+    /** 按稳定 id 主键幂等写入（同一 (taskId, originalEpochDay) 至多一行）。 */
     override suspend fun upsert(occurrence: TaskOccurrence) = withContext(ioDispatcher) {
         dao.upsert(occurrence.toEntity())
     }
