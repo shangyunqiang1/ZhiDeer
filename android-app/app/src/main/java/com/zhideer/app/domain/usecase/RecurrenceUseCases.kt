@@ -49,7 +49,12 @@ class RecurrenceUseCases(
         return Result.success(updated)
     }
 
-    /** 修改既有重复规则（规则须至少一个有效配置；传 null 表示移除）。 */
+    /**
+     * 修改既有重复规则（规则须至少一个有效配置；传 null 表示移除）。
+     * T14/#15 语义：出现按当前规则与锚点即时派生，规则调整只影响以后的出现、不留旧调度；
+     * 既有 (taskId, 出现日) 完成记录一律不删除、不改写（过去记录不被重写，issue #15），
+     * 例外日集合随传入规则保留。
+     */
     suspend fun update(taskId: String, rule: RecurrenceRule?): Result<TodoTask> {
         RecurrenceRule.validate(rule)?.let { return Result.failure(IllegalArgumentException(it)) }
         val task = tasksRepository.getTask(taskId)
@@ -79,7 +84,7 @@ class RecurrenceUseCases(
 
     /**
      * 完成或撤销某一次出现：完成记录独立时间戳；重复调用同一出现幂等（主键约束）。
-     * 仅 ACTIVE 的重复待办可记录；非出现日、非重复待办被拒绝并返回中文说明。
+     * 仅 ACTIVE 的重复待办可记录；非出现日、例外日、非重复待办被拒绝并返回中文说明。
      */
     suspend fun completeOccurrence(
         taskId: String,
@@ -96,6 +101,10 @@ class RecurrenceUseCases(
         }
         val rule = task.recurrenceRule
             ?: return Result.failure(IllegalStateException("该待办不是重复待办"))
+        if (occurrenceEpochDay in rule.exceptions) {
+            // T14/#15：例外日与完成明确区分——被排除的出现日不再要求完成
+            return Result.failure(IllegalArgumentException("该出现日已设为例外，不再要求完成"))
+        }
         if (!rule.occursOn(anchorEpochDay(task), occurrenceEpochDay)) {
             return Result.failure(IllegalArgumentException("该日期不属于重复计划"))
         }
@@ -109,6 +118,67 @@ class RecurrenceUseCases(
         )
         occurrenceRepository.upsert(row)
         return Result.success(row)
+    }
+
+    /**
+     * 单次跳过某次出现（T14/#15）：把该出现日加入规则的例外集合，仅本次不再出现、
+     * 不再要求完成，不改变其余出现日，也不产生完成记录（跳过与完成区分）。
+     * - 该日必须按规则几何（含锚点下限）是一次出现，否则拒绝；
+     * - 该日已完成时拒绝（需先撤销完成），保证跳过与完成互斥；
+     * - 已是例外时幂等成功，不重复写入（issue #15：重复提交不重复产生事项）。
+     */
+    suspend fun skipOccurrence(taskId: String, occurrenceEpochDay: Long): Result<TodoTask> {
+        val task = tasksRepository.getTask(taskId)
+            ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
+        if (task.trashedAt != null) {
+            return Result.failure(IllegalStateException("待办已进入回收站"))
+        }
+        if (task.status == TaskStatus.CANCELLED) {
+            return Result.failure(IllegalStateException("待办已取消，不能跳过各次出现"))
+        }
+        val rule = task.recurrenceRule
+            ?: return Result.failure(IllegalStateException("该待办不是重复待办"))
+        if (!rule.occursByPatternOn(anchorEpochDay(task), occurrenceEpochDay)) {
+            return Result.failure(IllegalArgumentException("该日期不属于重复计划"))
+        }
+        if (occurrenceRepository.listByTask(taskId).any {
+                it.occurrenceEpochDay == occurrenceEpochDay && it.completed
+            }
+        ) {
+            return Result.failure(IllegalStateException("该次出现已完成，请先撤销完成再跳过"))
+        }
+        if (occurrenceEpochDay in rule.exceptions) {
+            return Result.success(task)
+        }
+        val updated = task.copy(
+            recurrenceRule = rule.copy(exceptions = rule.exceptions + occurrenceEpochDay),
+            updatedAt = now(),
+        )
+        tasksRepository.upsertTask(updated)
+        return Result.success(updated)
+    }
+
+    /**
+     * 恢复被跳过（例外）的出现日：从例外集合移除，该日重新出现且完成状态以既有记录为准
+     * （既有完成记录一律不删除、不改写）。该日不是例外时幂等成功，不产生任何写入。
+     */
+    suspend fun restoreOccurrence(taskId: String, occurrenceEpochDay: Long): Result<TodoTask> {
+        val task = tasksRepository.getTask(taskId)
+            ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
+        if (task.trashedAt != null) {
+            return Result.failure(IllegalStateException("待办已进入回收站"))
+        }
+        val rule = task.recurrenceRule
+            ?: return Result.failure(IllegalStateException("该待办不是重复待办"))
+        if (occurrenceEpochDay !in rule.exceptions) {
+            return Result.success(task)
+        }
+        val updated = task.copy(
+            recurrenceRule = rule.copy(exceptions = rule.exceptions - occurrenceEpochDay),
+            updatedAt = now(),
+        )
+        tasksRepository.upsertTask(updated)
+        return Result.success(updated)
     }
 
     /** 观察某日在重复计划中出现的待办及其该次完成状态（排除取消与回收站）。 */

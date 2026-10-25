@@ -26,11 +26,15 @@ import java.time.DayOfWeek
 import java.time.LocalDate
 
 /**
- * 重复规则编辑对话框（T12/#13 每日与每周；T13/#14 每月）。独立 composable 供根界面挂接
- * （不改动既有待办编辑器）：
+ * 重复规则编辑对话框（T12/#13 每日与每周；T13/#14 每月；T14/#15 例外日期）。
+ * 独立 composable 供根界面挂接（不改动既有待办编辑器）：
  * - 无 / 每日（可选间隔天数）/ 每周（星期几多选）/ 每月（第 N 日，1-31），全部中文界面与提示；
  * - 每月第 N 日大于 28 时提示短月回退：2 月等短月落到当月最后一天，之后月份回到第 N 日
  *   （issue #14：不漂移）；下方预览会给出实际出现日期；
+ * - 例外日期管理（T14/#15，issue #15）：以 yyyy-MM-dd 添加/移除例外日，例外日仅排除该次
+ *   出现（不再出现、不再要求完成），不影响其余出现日，也不改写既有完成记录——
+ *   即「仅本次」调整；调整规则本身则作用于以后的出现（「本次及以后」）；
+ * - 摘要显示例外数（如「每天，已排除 2 天」），预览跳过例外日；
  * - 保存前预览具体规则摘要与 upcoming 出现日期（issue #13/#14 验收）；
  * - 保存回调 [onSave] 传 null 表示移除重复规则；非法配置即时提示且不触发保存。
  * [anchorEpochDay] 为出现锚点（新建时传今天，编辑既有待办时传
@@ -69,6 +73,9 @@ fun RecurrenceEditorDialog(
             initialRule?.takeIf { it.frequency == RecurrenceFrequency.MONTHLY }?.monthDay?.toString() ?: "1",
         )
     }
+    // T14/#15：例外日集合随规则一起编辑与保存（仅本次排除该次出现）
+    var exceptions by remember { mutableStateOf(initialRule?.exceptions ?: emptySet<Long>()) }
+    var exceptionDateText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun buildRule(): RecurrenceRule? {
@@ -91,13 +98,35 @@ fun RecurrenceEditorDialog(
                 }
                 RecurrenceRule(frequency = RecurrenceFrequency.MONTHLY, monthDay = monthDay)
             }
-        }
+        }?.copy(exceptions = exceptions)
         RecurrenceRule.validate(rule)?.let {
             error = it
             return null
         }
         error = null
         return rule
+    }
+
+    /** 添加例外日（T14/#15）：沿用 yyyy-MM-dd 输入与既有校验风格，仅接受当前规则的出现日。 */
+    fun addException() {
+        val parsed = runCatching { LocalDate.parse(exceptionDateText.trim()) }.getOrNull()
+        if (parsed == null) {
+            error = "日期格式应为 yyyy-MM-dd"
+            return
+        }
+        val current = buildRuleQuiet(kind, intervalText, weekdays, monthDayText)
+        if (current == null) {
+            error = "请先设置有效的重复规则"
+            return
+        }
+        val day = parsed.toEpochDay()
+        if (!current.occursByPatternOn(anchorEpochDay, day)) {
+            error = "该日期不是当前规则的出现日"
+            return
+        }
+        exceptions = exceptions + day
+        exceptionDateText = ""
+        error = null
     }
 
     AlertDialog(
@@ -169,7 +198,44 @@ fun RecurrenceEditorDialog(
                         )
                     }
                 }
+                // T14/#15 例外日期管理：仅本次排除该次出现，不影响以后的出现与既有完成记录
+                if (kind != RecurrenceKind.NONE) {
+                    Text(
+                        "例外日期（仅本次：该日不再出现、不再要求完成）",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    if (exceptions.isEmpty()) {
+                        Text(
+                            "暂无例外日",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                    exceptions.sorted().forEach { day ->
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Text(
+                                LocalDate.ofEpochDay(day).toString(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { exceptions = exceptions - day; error = null }) {
+                                Text("移除")
+                            }
+                        }
+                    }
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = exceptionDateText,
+                            onValueChange = { exceptionDateText = it; error = null },
+                            label = { Text("例外日期 yyyy-MM-dd") },
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { addException() }) { Text("添加为例外") }
+                    }
+                }
                 val current = buildRuleQuiet(kind, intervalText, weekdays, monthDayText)
+                    ?.copy(exceptions = exceptions)
                 if (current != null) {
                     Text(
                         "规则：${current.summary()}",
@@ -185,6 +251,11 @@ fun RecurrenceEditorDialog(
                     }
                     Text(
                         "每一次出现分别记录完成，本次未完成不阻止下一次出现。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    Text(
+                        "调整规则只影响以后的出现，已有完成记录按出现日保留。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
