@@ -133,8 +133,9 @@ class AiSessionStore(
  * - 优先 REPLACE_EXISTING + ATOMIC_MOVE；不支持原子移动时退回 REPLACE_EXISTING；
  * - 目标被短暂占用导致失败时小步重试，最终失败抛出原始异常（便于诊断）。
  * Windows 上 DataStore 默认实现此处失败会吞掉原因，Android/Linux 的 rename 本身可覆盖，不受影响。
+ * internal：T19/#20 的 AiProposalStore 复用同一文件系统策略（仍仅限 data.ai 包内）。
  */
-private object ReliableFileSystem : FileSystem() {
+internal object ReliableFileSystem : FileSystem() {
     private const val MOVE_ATTEMPTS = 8
     private const val MOVE_RETRY_DELAY_MS = 50L
 

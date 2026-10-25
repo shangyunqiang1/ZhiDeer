@@ -8,6 +8,7 @@ import com.zhideer.app.domain.model.AiChatMessage
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
 import com.zhideer.app.domain.model.AiConfig
+import com.zhideer.app.domain.model.AiProposalSendReply
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -16,6 +17,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
 
 /** AI 配置编辑输入；[apiKey] 为空表示保留已保存的 Key（便于只改模型或 Base URL）。 */
 data class AiConfigInput(
@@ -56,6 +59,9 @@ class AiChatUseCases(
     private val now: () -> Long,
     private val contextAuthorizer: AiContextAuthorizer,
     private val contextProvider: AiContextProvider,
+    // T19/#20 纯新增：提案协议提示注入"今天"日期与相对时间推算所用的创建时区；
+    // 默认系统时区保持既有构造（T17/T18 测试）不变。
+    private val zoneId: ZoneId = ZoneId.systemDefault(),
 ) {
 
     @Volatile
@@ -162,6 +168,109 @@ class AiChatUseCases(
     /** 撤销全部授权：下一次请求恢复为不含任何本地数据。 */
     fun revokeContextAuthorization() = contextAuthorizer.revoke()
 
+    // ---------- 操作提案（T19/#20，纯新增） ----------
+
+    /**
+     * 以"操作提案模式"发送（T19/#20）：
+     * - 请求额外注入提案协议 system 提示（模型按约定在回复末尾输出提案 JSON 块）；
+     * - 不要求、也不携带本地数据授权快照：创建提案只写不读（验收边界）；
+     * - 流式结束后解析回复：无 JSON 块 → [AiProposalSendReply.PlainReply]（原文保存）；
+     *   合法提案 → [AiProposalSendReply.Drafts]（会话保存人类可读摘要，条目交用例层落提案库）；
+     * - 解析失败自动重试一次（非流式补全），仍失败返回中文可诊断提示，不创建半成品；
+     * - 取消/中断沿用既有语义：不保存部分回复，用户消息保留，无提案产生。
+     */
+    suspend fun sendProposalRequest(
+        sessionId: String?,
+        userText: String,
+        onDelta: (String) -> Unit,
+    ): Result<AiProposalSendReply> {
+        val today = Instant.ofEpochMilli(now()).atZone(zoneId).toLocalDate()
+        val system = AiChatMessage(role = AiChatRole.SYSTEM, content = buildProposalSystemPrompt(today, zoneId))
+        val reply = StringBuilder()
+        val sent = sendInternal(
+            sessionId,
+            userText,
+            onDelta = { delta ->
+                reply.append(delta)
+                onDelta(delta)
+            },
+            requestPrefix = listOf(system),
+            includeHistory = true,
+            saveReply = false,
+        )
+        // 取消/中断/网络错误直接透传（均为中文提示）：不解析、不产生提案、无业务写入
+        val session = sent.getOrElse { return Result.failure(it) }
+        return finishProposalReply(session, reply.toString(), retried = false)
+    }
+
+    /**
+     * 回复落地：解析 → 无块保存原文 / 合法保存摘要并交出条目 / 失败且未重试过则重试一次。
+     * 重试走非流式补全（二次流式增量会污染 UI 的拼接文本）。
+     */
+    private suspend fun finishProposalReply(
+        session: AiChatSession,
+        replyText: String,
+        retried: Boolean,
+    ): Result<AiProposalSendReply> = when (val parsed = parseProposalReply(replyText, zoneId, idGen)) {
+        is AiProposalParseOutcome.Plain ->
+            appendAssistantMessage(session.id, replyText).map { AiProposalSendReply.PlainReply(it) }
+        is AiProposalParseOutcome.Drafts ->
+            appendAssistantMessage(session.id, summarizeProposal(parsed.items, zoneId))
+                .map { AiProposalSendReply.Drafts(it, parsed.items) }
+        is AiProposalParseOutcome.Invalid -> {
+            val reason = parsed.reason
+            if (retried) {
+                Result.failure(AiChatException(proposalFailureMessage(reason)))
+            } else {
+                retryProposalReply(session, reason)
+            }
+        }
+    }
+
+    /** 解析失败自动重试一次（非流式补全）；仍失败返回中文可诊断提示，本次不保存任何回复。 */
+    private suspend fun retryProposalReply(
+        session: AiChatSession,
+        firstReason: String,
+    ): Result<AiProposalSendReply> {
+        val config = configStore.load()
+            ?: return Result.failure(IllegalStateException("请先在设置中配置 API Key、模型标识和 Base URL"))
+        val retryReply = try {
+            // 会话消息已含本次用户消息（第一轮坏回复未保存），补上协议 system 提示后整轮重发
+            client.chatCompletion(
+                config,
+                listOf(AiChatMessage(role = AiChatRole.SYSTEM, content = buildProposalSystemPrompt(todayText(), zoneId))) +
+                    session.messages,
+                maxTokens = PROPOSAL_RETRY_MAX_TOKENS,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            return Result.failure(AiChatException(proposalFailureMessage(firstReason), e))
+        }
+        return finishProposalReply(session, retryReply, retried = true)
+    }
+
+    private fun todayText(): java.time.LocalDate = Instant.ofEpochMilli(now()).atZone(zoneId).toLocalDate()
+
+    private fun proposalFailureMessage(reason: String): String =
+        "无法生成操作提案：$reason 已自动重试一次仍未成功，本次未创建任何内容，请换个说法再试。"
+
+    /**
+     * 向既有会话追加一条助手消息（T19/#20 纯新增）：供提案回复摘要与确认回执写入对话流使用。
+     * 生成期间删除会话等失败路径返回中文提示；不触发任何网络请求。
+     */
+    suspend fun appendAssistantMessage(sessionId: String, content: String): Result<AiChatSession> {
+        val fresh = sessionStore.load()
+        val current = fresh.find { it.id == sessionId }
+            ?: return Result.failure(IllegalStateException("会话不存在或已删除，回执未保存"))
+        val updated = current.copy(
+            messages = current.messages + AiChatMessage(role = AiChatRole.ASSISTANT, content = content),
+            updatedAt = now(),
+        )
+        sessionStore.save(fresh.map { if (it.id == updated.id) updated else it })
+        return Result.success(updated)
+    }
+
     // ---------- 内部发送路径（sendStreaming / sendWithAuthorizedContext 共用） ----------
 
     /**
@@ -176,6 +285,9 @@ class AiChatUseCases(
         onDelta: (String) -> Unit,
         requestPrefix: List<AiChatMessage>,
         includeHistory: Boolean,
+        // T19/#20 纯新增：提案路径先解析回复再决定保存内容（摘要或原文），
+        // 传 false 时流正常结束也不自动保存助手消息，由调用方追加。
+        saveReply: Boolean = true,
     ): Result<AiChatSession> = coroutineScope {
         val text = userText.trim()
         if (text.isEmpty()) {
@@ -225,6 +337,9 @@ class AiChatUseCases(
                 val current = fresh.find { it.id == withUser.id }
                 if (current == null) {
                     deferred.complete(Result.failure(AiChatException("会话在生成期间被删除，回复未保存")))
+                } else if (!saveReply) {
+                    // 提案路径：助手消息由调用方解析回复后以摘要或原文追加
+                    deferred.complete(Result.success(current))
                 } else {
                     val completed = current.copy(
                         messages = current.messages + AiChatMessage(role = AiChatRole.ASSISTANT, content = reply.toString()),
@@ -300,6 +415,9 @@ class AiChatUseCases(
     private companion object {
         const val TITLE_N = 12
         const val CANCELLED_MESSAGE = "已取消生成：未保存部分回复，已发送的消息保留。"
+
+        // T19/#20：提案重试走非流式补全，放宽输出上限以容纳完整提案 JSON
+        const val PROPOSAL_RETRY_MAX_TOKENS = 2048
     }
 }
 

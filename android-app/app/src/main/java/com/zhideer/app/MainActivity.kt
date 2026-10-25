@@ -76,7 +76,10 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     calendarReminderUseCases = container.calendarReminderUseCases,
                 )
                 Tab.NOTES -> NotesScreen(useCases = container.noteUseCases)
-                Tab.AI -> com.zhideer.app.ui.AiScreen(useCases = container.aiChatUseCases)
+                Tab.AI -> com.zhideer.app.ui.AiScreen(
+                    useCases = container.aiChatUseCases,
+                    proposalUseCases = container.aiProposalUseCases,
+                )
                 Tab.BIN -> com.zhideer.app.ui.RecycleBinScreen(useCases = container.recycleBinUseCases)
             }
         }
