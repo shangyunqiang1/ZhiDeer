@@ -154,3 +154,46 @@
 ### 结论
 
 #3 的验收标准要求"通知、显式准时提醒、重启恢复及省电限制下的可观察结果"与"系统语音识别、中文 TTS、麦克风拒绝及缺少引擎的回落能力"逐项核对。本轮已实证通知投递、精确提醒准时性与不当降级、中文 TTS、识别服务缺失、系统时钟交接的真实边界；**重启恢复、省电限制、时间变化、麦克风拒绝与产品级提醒投递仍未验证**，因此 #3 不宣称全部通过。
+
+## 2026-10-25 晚 产品级提醒真实投递复核（#9 / #10）
+
+**设备与基线**：OPPO PHW110、Android 15（API 35）、ColorOS V15.0.0、Asia/Shanghai；安装集成分支 tip `6943036` 构建的 `app-debug.apk`（v0.1.0）。测试期临时调整屏幕超时为 30 分钟并开启充电常亮，测试后恢复原 `screen_off_timeout=60000`。证据目录仓库外 `G:/ZhiDeer-tools/evidence/device/`。
+
+### 权限路径（应用级实测）
+
+| 项目 | 状态 | 命令/界面结果 |
+| --- | --- | --- |
+| 通知（应用级） | 允许 | `cmd appops get com.zhideer.app POST_NOTIFICATION` → 默认允许；通知渠道 `zhideer_reminders` importance=4（HIGH）、系统默认提示音、`mVibrationEnabled=true` |
+| 精确闹钟：初始 | **未授权** | `SCHEDULE_EXACT_ALARM` 默认模式；应用详情页显示「有提醒未就绪 / 未就绪：未授予精确闹钟权限，提醒暂无法准时触发」，提供 重新检查 / 去授权 / 确认降级；提醒记录保留，未隐式降级（截图 `t08-reminder-added.png`、`d02-grant-page.png`） |
+| 精确闹钟：授权 | 允许 | 点击「去授权」跳转系统「闹钟和提醒 → 允许设置闹钟和提醒」；开启开关后 `cmd appops get … SCHEDULE_EXACT_ALARM` → `Uid mode: allow` |
+| adb 直接改 appops | 被拒绝 | `cmd appops set com.zhideer.app SCHEDULE_EXACT_ALARM allow` → `SecurityException: uid 2000 does not have MANAGE_APP_OPS_MODES`，与既有“必须用户手动在系统设置开启”的结论一致 |
+
+### #9 待办提醒（T08）
+
+1. 在应用内新建待办「T08」，时刻截止 `2026-10-25 20:40`，显式添加「截止前 1 分钟」提醒 → 详情页展示目标时刻 `2026-10-25 20:39`。
+2. 授权前：显示未就绪与修复入口；授权后点击「重新检查」，未就绪标记消失。
+3. `dumpsys alarm` 实测（授权后）：`RTC_WAKEUP … origWhen=2026-10-25 20:39:00.000 … exactAllowReason=permission component=com.zhideer.app/.platform.ReminderAlarmReceiver`，但同一行 `windowLength=166119`（平台附加投递窗口）。
+4. 锁屏等待（`mScreenState=DOZE_SUSPEND`）：实际于 **20:41:31** 投递（+2m31s）。`logcat -b events` 记录 `notification_enqueue: [10309,21250,com.zhideer.app,… channel=zhideer_reminders …]`；通知中心可见「T08 / 知时鹿提醒：时间到了，来看看「T08」」（截图 `d01-app-notif-shade.png`）。
+
+### #10 日程提醒（T09）
+
+1. 新建日程「T09」，`2026-10-25 20:52 ～ 21:00`，时区 `Asia/Shanghai`（创建时锚定）；在详情页添加**独立时刻**提醒 `2026-10-25 20:51`。
+2. 授权后 `dumpsys alarm` 出现第二条 `RTC_WAKEUP … origWhen=2026-10-25 20:51:00.000 exactAllowReason=permission`，`windowLength=242880`。
+3. 锁屏等待：实际于 **20:51:31** 投递（+31s）；通知中心出现分组摘要（`ranker_group`，计数 2），展开可见「T09 知时鹿提醒：时间到了，来看看「T09」」与上一条 T08（截图 `t09-shade.png`）。
+4. 相对/独立提醒的改期行为、日程删除停止自身提醒且不影响关联待办提醒、去重由 `CalendarReminderUseCasesTest` / `ReminderUseCasesTest` 覆盖。
+
+### 本轮发现与结论
+
+1. **ColorOS 15 对已授权精确闹钟仍附加投递窗口**（windowLength 2–4 分钟）：权限允许只代表平台接受精确调度请求，不保证锁屏/待机下秒级投递。观测延迟：2m31s、31s。
+2. 屏幕熄灭进入 DOZE_SUSPEND 时提醒仍能真实投递，通知中心可见；同渠道通知被系统自动分组。
+3. 因此「调度请求提交成功」与「真实触发」必须分别记录，#9/#10 的“准时”不得写成“任何电源状态下秒级准时”；该限制由 #11（恢复设备变化后的提醒）与 #36（故障诊断）继续承接。
+4. 提示音与振动：本轮只核对到渠道配置（系统默认提示音、振动开启），未逐项人工听感确认。
+### D04 省电/休眠条件补充（同一晚，产品提醒）
+
+- 条件：`adb shell cmd power set-mode 1`（`settings get global low_power` = 1，省电模式开启），屏幕熄灭（`mScreenState=DOZE_SUSPEND`、`mWakefulness=Dozing`），应用此前在前台。
+- 调度：待办 T08 的独立时刻提醒目标 `2026-10-25 21:08:00`；`dumpsys alarm` 记录 `exactAllowReason=permission`、`window=+5m0s205ms`（较默认条件更宽），policy 行出现 `battery_saver=-2s132ms`。
+- 结果：实际投递 **21:14:13**（目标后 6m13s），`notification_enqueue` 正常记录；投递时刻贴近自动化唤醒屏幕的动作，说明深休/省电下可能要到设备唤醒才补投。
+- 恢复：测试后 `cmd power set-mode 0`（`low_power`=0）。厂商级后台冻结/应用速冻未做脚本化切换（ColorOS 未提供可脚本化开关），只能记录设备处于省电+待机时的可观察结果，不外推到所有厂商限制。
+- 结论：省电/待机显著扩大投递窗口（30s → 2m31s → 6m13s 三档观测），提醒最终仍能到达；因此界面与诊断不得把「已调度」呈现为「已准时投递」。
+
+
