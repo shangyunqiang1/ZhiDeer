@@ -412,6 +412,8 @@ class AiProposalUseCases(
                 createdScheduleIds = scheduleIds,
                 createdMemoryIds = memoryIds,
                 resultMessage = resultMessage,
+                // T30/#31：真实执行是否全部成功（成功才可标记采纳；失败/部分失败不标已采纳）
+                executionSucceeded = failLines.isEmpty(),
             )
         } ?: return Result.failure(IllegalStateException("操作提案状态已变化，请刷新后重试"))
         // 结果回写到对话流（成功消息含已执行记录标识）；回执写入失败不影响执行结果

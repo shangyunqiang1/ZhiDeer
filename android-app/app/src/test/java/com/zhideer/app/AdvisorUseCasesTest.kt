@@ -1,5 +1,6 @@
 package com.zhideer.app
 
+import com.zhideer.app.data.ai.AdvisorRecordStore
 import com.zhideer.app.data.ai.AiProposalStore
 import com.zhideer.app.domain.model.AiProposalKind
 import com.zhideer.app.domain.model.AiProposalOp
@@ -67,6 +68,7 @@ class AdvisorUseCasesTest {
 
     private lateinit var storeDir: File
     private lateinit var proposalStore: AiProposalStore
+    private lateinit var recordStore: AdvisorRecordStore
     private lateinit var fakeTasks: FakeTasksRepository
     private lateinit var fakeOccurrences: FakeTaskOccurrenceRepository
     private lateinit var fakeCalendar: FakeCalendarRepository
@@ -80,6 +82,7 @@ class AdvisorUseCasesTest {
         storeDir = File(System.getProperty("java.io.tmpdir"), "t29-test-${System.nanoTime()}")
         check(storeDir.mkdirs() || storeDir.isDirectory) { "无法创建测试目录" }
         proposalStore = AiProposalStore(File(storeDir, "ai_proposals.preferences_pb"))
+        recordStore = AdvisorRecordStore(File(storeDir, "advisor_records.preferences_pb"))
         fakeTasks = FakeTasksRepository()
         fakeOccurrences = FakeTaskOccurrenceRepository()
         fakeCalendar = FakeCalendarRepository()
@@ -109,6 +112,7 @@ class AdvisorUseCasesTest {
             memoryUseCases = memories,
             authorizer = authorizer,
             proposalStore = proposalStore,
+            recordStore = recordStore,
             idGen = { "proposal-advisor" },
             now = { NOW },
             zoneId = ZONE,
@@ -118,6 +122,7 @@ class AdvisorUseCasesTest {
     @After
     fun tearDown() {
         proposalStore.close()
+        recordStore.close()
         storeDir.deleteRecursively()
     }
 
