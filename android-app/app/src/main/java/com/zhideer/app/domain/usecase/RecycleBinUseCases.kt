@@ -86,7 +86,9 @@ data class RecycleBinPurgeResult(
  * - 物理删除该记录及其全部从属数据（子任务/清单项/提醒/出现完成记录/关联残留），
  *   逐表显式硬删除，不依赖外键级联是否启用；
  * - 删除待办保留其曾关联的日程记录本身（与普通删除语义一致），仅解除关联残留；
- * - 仅作用于四类普通事项：记忆和隐私数据不套用三十天规则（本工程尚无记忆存储）。
+ * - 仅作用于四类普通事项：记忆与隐私数据不进回收站、不套用三十天规则（#17）；
+ *   但来源被彻底删除时经 [onSourcePurged] 级联清理引用它的长期记忆（#28），
+ *   记忆自身无保留期，不在此三十天范畴内。
  *
  * 三十天到期清理：
  * - [purgeExpired] 删除 trashedAt <= cutoffMillis 的回收站记录；
@@ -107,6 +109,15 @@ class RecycleBinUseCases(
     private val taskScheduleLinkUseCases: TaskScheduleLinkUseCases,
     private val now: () -> Long,
     private val ioDispatcher: CoroutineContext = Dispatchers.IO,
+    // T27/#28 纯新增：来源恢复联动钩子，默认无操作。恢复待办/日程/便签成功后触发，
+    // AppContainer 注册为 MemoryUseCases::clearSourceMissing——清除关联记忆的
+    // 来源缺失标记，但【不自动启用】记忆（恢复来源不自动启用，issue #28）。不改既有语义。
+    private val onSourceRestored: suspend (kind: RecycleBinKind, sourceId: String) -> Unit = { _, _ -> },
+    // T27/#28 纯新增：来源彻底删除联动钩子，默认无操作。purge 与三十天到期清理
+    // 成功彻底删除待办/日程/便签后触发，AppContainer 注册为 MemoryUseCases::purgeBySource
+    // ——物理删除关联记忆并清理检索入口（issue #28：清理关联记忆和检索索引）。
+    // 记忆自身不进回收站，不在此三十天保留范畴内（只随来源彻底删除级联清理）。不改既有语义。
+    private val onSourcePurged: suspend (kind: RecycleBinKind, sourceId: String) -> Unit = { _, _ -> },
 ) {
 
     // ---------- 查看 ----------
@@ -174,6 +185,7 @@ class RecycleBinUseCases(
         val before = subTasksRepository.listByParent(taskId).size
         subTasksRepository.restoreForParent(taskId, trashedAt, t)
         val restoredSubTasks = subTasksRepository.listByParent(taskId).size - before
+        onSourceRestored(RecycleBinKind.TASK, taskId) // #28：清除关联记忆的来源缺失标记（不自动启用）
         val message = buildString {
             append("已恢复「${task.title}」")
             if (restoredSubTasks > 0) append("，同批恢复 $restoredSubTasks 个子任务")
@@ -199,6 +211,7 @@ class RecycleBinUseCases(
             return Result.success(idempotentRestore(entryId, RecycleBinKind.SCHEDULE, entry.title))
         }
         calendarRepository.upsertEntry(entry.copy(trashedAt = null, updatedAt = now()))
+        onSourceRestored(RecycleBinKind.SCHEDULE, entryId) // #28：清除关联记忆的来源缺失标记（不自动启用）
         return Result.success(
             RecycleBinRestoreResult(
                 kind = RecycleBinKind.SCHEDULE,
@@ -217,6 +230,7 @@ class RecycleBinUseCases(
             return Result.success(idempotentRestore(noteId, RecycleBinKind.NOTE, note.title))
         }
         notesRepository.upsertNote(note.copy(trashedAt = null, updatedAt = now()))
+        onSourceRestored(RecycleBinKind.NOTE, noteId) // #28：清除关联记忆的来源缺失标记（不自动启用）
         return Result.success(
             RecycleBinRestoreResult(
                 kind = RecycleBinKind.NOTE,
@@ -281,6 +295,7 @@ class RecycleBinUseCases(
             ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
         reminderUseCases.cancelReminders(taskId) // 防御：取消可能残留的闹钟并清除提醒记录
         taskScheduleLinkUseCases.unlinkTask(taskId) // 关联残留：日程保留，关联解除
+        onSourcePurged(RecycleBinKind.TASK, taskId) // #28：来源彻底删除，清理关联记忆与检索入口
         taskOccurrenceRepository.purgeByTask(taskId)
         subTasksRepository.purgeByParent(taskId)
         tasksRepository.purgeTask(taskId)
@@ -292,6 +307,7 @@ class RecycleBinUseCases(
         calendarRepository.getEntry(entryId)
             ?: return Result.failure(IllegalStateException("日程不存在或已永久删除"))
         calendarReminderUseCases.cancelReminders(entryId)
+        onSourcePurged(RecycleBinKind.SCHEDULE, entryId) // #28：来源彻底删除，清理关联记忆与检索入口
         calendarRepository.purgeEntry(entryId)
         return Result.success(Unit)
     }
@@ -300,6 +316,7 @@ class RecycleBinUseCases(
     suspend fun purgeNote(noteId: String): Result<Unit> {
         notesRepository.getNote(noteId)
             ?: return Result.failure(IllegalStateException("便签不存在或已永久删除"))
+        onSourcePurged(RecycleBinKind.NOTE, noteId) // #28：来源彻底删除，清理关联记忆与检索入口
         notesRepository.purgeNote(noteId)
         return Result.success(Unit)
     }
@@ -333,17 +350,26 @@ class RecycleBinUseCases(
         tasksRepository.listTrashedTasks()
             .filter { it.trashedAt != null && it.trashedAt <= cutoffMillis }
             .forEach { task ->
-                if (tasksRepository.purgeIfExists(task.id)) purgedTasks++
+                if (tasksRepository.purgeIfExists(task.id)) {
+                    purgedTasks++
+                    onSourcePurged(RecycleBinKind.TASK, task.id) // #28：来源到期清理，级联清理关联记忆
+                }
             }
         calendarRepository.listTrashedEntries()
             .filter { it.trashedAt != null && it.trashedAt <= cutoffMillis }
             .forEach { entry ->
-                if (calendarRepository.purgeIfExists(entry.id)) purgedEntries++
+                if (calendarRepository.purgeIfExists(entry.id)) {
+                    purgedEntries++
+                    onSourcePurged(RecycleBinKind.SCHEDULE, entry.id) // #28：同上
+                }
             }
         notesRepository.listTrashedNotes()
             .filter { it.trashedAt != null && it.trashedAt <= cutoffMillis }
             .forEach { note ->
-                if (notesRepository.purgeIfExists(note.id)) purgedNotes++
+                if (notesRepository.purgeIfExists(note.id)) {
+                    purgedNotes++
+                    onSourcePurged(RecycleBinKind.NOTE, note.id) // #28：同上
+                }
             }
         return RecycleBinPurgeResult(
             purgedTasks = purgedTasks,

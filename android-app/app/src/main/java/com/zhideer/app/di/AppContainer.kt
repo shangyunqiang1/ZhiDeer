@@ -21,6 +21,7 @@ import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
+import com.zhideer.app.domain.model.MemoryRefType
 import com.zhideer.app.domain.repository.MemoriesRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.OccurrenceSubTaskRecordsRepository
@@ -33,12 +34,14 @@ import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiProposalTargetMatcher
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.AdvisorUseCases
 import com.zhideer.app.domain.usecase.BackupUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.MemoryUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases
+import com.zhideer.app.domain.usecase.RecycleBinKind
 import com.zhideer.app.domain.usecase.RecycleBinUseCases
 import com.zhideer.app.domain.usecase.RecurrenceUseCases
 import com.zhideer.app.domain.usecase.ReminderUseCases
@@ -82,6 +85,19 @@ class AppContainer(
         .build()
 
     private val ioDispatcher: CoroutineContext = Dispatchers.IO
+
+    // —— T26/#27 长期记忆：纯新增装配（T27/#28 起先于普通事项用例，供来源删除边界联动钩子引用）——
+    // 记忆是独立于便签与待办的隐私数据：独立 memories 表与独立入口，删除即彻底删除
+    // （不进回收站、不套普通事项三十天保留规则）；只有用户显式保存并确认的内容成为
+    // 长期记忆（T28/#29 起含聊天确认来源），是否随 AI 请求外发由授权体系管理。
+    val memoriesRepository: MemoriesRepository =
+        MemoriesRepositoryImpl(database.memoryDao(), Dispatchers.IO)
+
+    val memoryUseCases: MemoryUseCases = MemoryUseCases(
+        repository = memoriesRepository,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
+    )
 
     val tasksRepository: TasksRepository = TasksRepositoryImpl(database.taskDao(), Dispatchers.IO)
 
@@ -131,10 +147,12 @@ class AppContainer(
         // #8：父待办进入回收站时子任务联动删除，保留父子关系供恢复；
         // #9：待办删除时其提醒一并停止（取消闹钟并清除记录）
         // #12：待办删除时保留全部关联日程并解除关联（删除待办不连带删除日程）
+        // #28：待办删除（回收站）时立即停用引用它的记忆并标记来源缺失
         onTrashed = { taskId ->
             subTaskUseCases.trashForParent(taskId)
             reminderUseCases.cancelReminders(taskId)
             taskScheduleLinkUseCases.unlinkTask(taskId)
+            memoryUseCases.markSourceMissing(MemoryRefType.TASK, taskId)
         },
         // #9：截止编辑/延期后相对提醒随截止移动，独立时刻提醒不动
         onDueChanged = { taskId -> reminderUseCases.rescheduleForDueChange(taskId) },
@@ -186,7 +204,11 @@ class AppContainer(
         // #10：日程改期/时区重解释后相对提醒随开始时刻移动，独立时刻提醒不动
         onTimesChanged = { entryId -> calendarReminderUseCases.rescheduleForStartChange(entryId) },
         // #10：日程删除（回收站）时停止其自身提醒，不影响关联待办自身的提醒
-        onTrashed = { entryId -> calendarReminderUseCases.cancelReminders(entryId) },
+        // #28：日程删除（回收站）时立即停用引用它的记忆并标记来源缺失
+        onTrashed = { entryId ->
+            calendarReminderUseCases.cancelReminders(entryId)
+            memoryUseCases.markSourceMissing(MemoryRefType.SCHEDULE, entryId)
+        },
     )
 
     val notesRepository: NotesRepository = NotesRepositoryImpl(database.noteDao(), Dispatchers.IO)
@@ -195,19 +217,8 @@ class AppContainer(
         repository = notesRepository,
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
-    )
-
-    // —— T26/#27 长期记忆：纯新增装配 ——
-    // 记忆是独立于便签与待办的隐私数据：独立 memories 表与独立入口，删除即彻底删除
-    // （不进回收站、不套普通事项三十天保留规则）；只有用户显式保存并确认的内容成为
-    // 长期记忆（T28/#29 起含聊天确认来源），是否随 AI 请求外发由授权体系管理。
-    val memoriesRepository: MemoriesRepository =
-        MemoriesRepositoryImpl(database.memoryDao(), Dispatchers.IO)
-
-    val memoryUseCases: MemoryUseCases = MemoryUseCases(
-        repository = memoriesRepository,
-        idGen = { UUID.randomUUID().toString() },
-        now = nowMillis,
+        // #28：便签删除（回收站）时立即停用引用它的记忆并标记来源缺失
+        onTrashed = { noteId -> memoryUseCases.markSourceMissing(MemoryRefType.NOTE, noteId) },
     )
 
     val taskScheduleLinkUseCases: TaskScheduleLinkUseCases = TaskScheduleLinkUseCases(
@@ -220,6 +231,7 @@ class AppContainer(
     // 统一回收站入口：查看、恢复、彻底删除与三十天到期清理（GLOSSARY：回收站）。
     // 恢复策略：父子整体恢复；已解除的日程关联默认不自动重连（恢复结果明确提示）；
     // 提醒不复活，错过的提醒只提示不补响。彻底删除级联清理从属数据。
+    // #28：来源恢复/彻底删除的关联记忆联动（恢复不清除停用、彻底删除级联清理记忆）。
     val recycleBinUseCases: RecycleBinUseCases = RecycleBinUseCases(
         tasksRepository = tasksRepository,
         subTasksRepository = subTasksRepository,
@@ -230,6 +242,22 @@ class AppContainer(
         calendarReminderUseCases = calendarReminderUseCases,
         taskScheduleLinkUseCases = taskScheduleLinkUseCases,
         now = nowMillis,
+        onSourceRestored = { kind, sourceId ->
+            when (kind) {
+                RecycleBinKind.TASK -> memoryUseCases.clearSourceMissing(MemoryRefType.TASK, sourceId)
+                RecycleBinKind.SCHEDULE -> memoryUseCases.clearSourceMissing(MemoryRefType.SCHEDULE, sourceId)
+                RecycleBinKind.NOTE -> memoryUseCases.clearSourceMissing(MemoryRefType.NOTE, sourceId)
+                RecycleBinKind.SUB_TASK -> Unit // 记忆来源引用不指向子任务
+            }
+        },
+        onSourcePurged = { kind, sourceId ->
+            when (kind) {
+                RecycleBinKind.TASK -> memoryUseCases.purgeBySource(MemoryRefType.TASK, sourceId)
+                RecycleBinKind.SCHEDULE -> memoryUseCases.purgeBySource(MemoryRefType.SCHEDULE, sourceId)
+                RecycleBinKind.NOTE -> memoryUseCases.purgeBySource(MemoryRefType.NOTE, sourceId)
+                RecycleBinKind.SUB_TASK -> Unit // 记忆来源引用不指向子任务
+            }
+        },
     )
 
     // 三十天到期清理的启动懒执行调度（T16/#17）：应用启动时触发一次，
@@ -323,6 +351,24 @@ class AppContainer(
             targetMatcher = aiProposalTargetMatcher,
             // T28/#29 纯新增：记忆提案确认后经长期记忆真实入口保存（来源聊天确认）
             memoryUseCases = memoryUseCases,
+            idGen = { UUID.randomUUID().toString() },
+            now = nowMillis,
+            zoneId = zoneId,
+        )
+    }
+
+    // —— T29/#30 参谋建议：纯新增装配 ——
+    // 本地规则引擎从真实仓库只读派生有依据的建议（离线可用，不依赖模型）；
+    // 采纳 = suggestionToProposal 落 PENDING 操作提案（sessionId = null），
+    // 此后完全复用既有提案状态机（aiProposalUseCases.confirmProposal 确认执行）。
+    // 生成与查看建议绝不写业务仓库；记忆类建议仅在 MEMORY 类别授权后读取活动记忆。
+    val advisorUseCases: AdvisorUseCases by lazy {
+        AdvisorUseCases(
+            taskUseCases = taskUseCases,
+            calendarUseCases = calendarUseCases,
+            memoryUseCases = memoryUseCases,
+            authorizer = aiContextAuthorizer,
+            proposalStore = aiProposalStore,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,
