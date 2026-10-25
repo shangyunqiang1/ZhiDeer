@@ -448,7 +448,7 @@ class BackupUseCasesTest {
         val inspection = useCases.inspectBackup(target, password).getOrThrow()
 
         assertEquals(BackupUseCases.FORMAT_VERSION, inspection.formatVersion)
-        assertEquals(12, inspection.dbVersion)
+        assertEquals("备份库版本应为当前 schema 版本", currentDbVersion(), inspection.dbVersion)
         assertEquals(clock.last(), inspection.exportedAt)
         assertEquals("摘要应展示备份时点各表计数", 2, inspection.tableCounts.getValue("tasks"))
         assertEquals(1, inspection.tableCounts.getValue("memories"))
@@ -495,7 +495,7 @@ class BackupUseCasesTest {
 
         // 摘要与备份清单一致
         assertEquals(exported.tableCounts, summary.tableCounts)
-        assertEquals(12, summary.dbVersion)
+        assertEquals("恢复摘要的库版本应与导出一致", exported.dbVersion, summary.dbVersion)
         assertEquals(clock.last(), summary.exportedAt)
         assertEquals(1, summary.aiSessionCount)
 
@@ -602,8 +602,8 @@ class BackupUseCasesTest {
         reopen()
         db.taskDao().upsert(taskEntity("task-2", "当前有效数据"))
         reopen()
-        // 手工构造 dbVersion=13（高于当前 12）的合法加密备份
-        val future = rawBackupFile(testPayload(dbVersion = 13), "future.zdbak")
+        // 手工构造 dbVersion 高于当前 schema 的合法加密备份
+        val future = rawBackupFile(testPayload(dbVersion = currentDbVersion() + 1), "future.zdbak")
 
         val inspection = useCases.inspectBackup(future, password).getOrThrow()
         assertFalse("高版本备份应标记不兼容", inspection.compatible)
@@ -673,7 +673,10 @@ class BackupUseCasesTest {
             put("updatedAt", JsonPrimitive(1L))
             put("trashedAt", JsonNull)
         }
-        val payload = testPayload(dbVersion = 12, overrides = mapOf("sub_tasks" to listOf(ghostRow)))
+        val payload = testPayload(
+            dbVersion = currentDbVersion(),
+            overrides = mapOf("sub_tasks" to listOf(ghostRow)),
+        )
         val file = rawBackupFile(payload, "ghost.zdbak")
 
         val result = useCases.restoreAll(file, password)
@@ -810,6 +813,14 @@ class BackupUseCasesTest {
     private suspend fun countTable(table: String): Int =
         db.useConnection(isReadOnly = true) { connection ->
             connection.usePrepared("SELECT COUNT(*) FROM $table") { statement ->
+                if (statement.step()) statement.getLong(0).toInt() else 0
+            }
+        }
+
+    /** 直读当前数据库 schema 版本（PRAGMA user_version），断言不硬编码版本号。 */
+    private suspend fun currentDbVersion(): Int =
+        db.useConnection(isReadOnly = true) { connection ->
+            connection.usePrepared("PRAGMA user_version") { statement ->
                 if (statement.step()) statement.getLong(0).toInt() else 0
             }
         }
