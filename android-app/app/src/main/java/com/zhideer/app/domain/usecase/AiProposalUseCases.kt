@@ -8,18 +8,22 @@ import com.zhideer.app.domain.model.AiProposalDeleteAction
 import com.zhideer.app.domain.model.AiProposalItem
 import com.zhideer.app.domain.model.AiProposalKind
 import com.zhideer.app.domain.model.AiProposalOp
+import com.zhideer.app.domain.model.AiProposalScope
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalSendReply
 import com.zhideer.app.domain.model.AiProposalStatus
+import com.zhideer.app.domain.model.AiProposalTargetRecord
 import com.zhideer.app.domain.model.MemorySource
 import com.zhideer.app.domain.model.Reminder
 import com.zhideer.app.domain.model.TaskPriority
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
 import java.time.ZoneId
 
 /**
- * AI 操作提案用例（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除）：
+ * AI 操作提案用例（T19/#20，T20/#21 扩展日程与提醒，T21/#22 扩展修改与删除，
+ * T22/#23 扩展重复规则、子任务与「仅本次/本次及以后」范围）：
  * 起草提案入库、确认执行、忽略与逐项移除、多候选目标点选。
  *
  * 状态机（GLOSSARY「操作提案」：尚未执行、供用户核对的方案；用户确认后才执行）：
@@ -30,15 +34,21 @@ import java.time.ZoneId
  * - 进程在 CONFIRMED 期间中断时结果未知：再次确认返回"待核实"提示，绝不虚报成功或失败，也不重复执行。
  *
  * 确认执行（真实入口，不绕过）：
- * - 新增：待办经 [TaskUseCases.create]、便签经 [NoteUseCases.create]；
+ * - 新增：待办经 [TaskUseCases.create]（重复规则再经 [RecurrenceUseCases.create]、子任务步骤逐条经
+ *   [SubTaskUseCases.create]）、便签经 [NoteUseCases.create]；
  *   日程（T20/#21）先经 [CalendarUseCases.create] 创建，附属提醒一并经
  *   [CalendarReminderUseCases.setReminders] 设置（含去重；非法提醒在确认前已整批拒绝）；
  *   长期记忆（T28/#29）经 [MemoryUseCases.create] 保存，来源标记聊天确认（可追溯）、
  *   写入即已确认；确认前记忆表绝无写入（GLOSSARY：操作提案）；
  * - 修改（T21/#22）：待办经 [TaskUseCases.update]/[TaskUseCases.complete]、便签经 [NoteUseCases.update]、
  *   日程经 [CalendarUseCases.update]（时间变化自动联动相对提醒重算）；
+ * - 重复规则与子任务（T22/#23）：修改待办的重复规则经 [RecurrenceUseCases.update]/[RecurrenceUseCases.remove]，
+ *   追加步骤经 [SubTaskUseCases.create]；「仅本次」修改经 [RecurrenceUseCases.postponeOccurrence]
+ *   单次延期（不挪动后续日期、不改写过去记录），取消「仅本次」经 [RecurrenceUseCases.skipOccurrence]
+ *   跳过该次出现（例外日）；未说明范围时绝不静默改整组；
  * - 删除（T21/#22）：待办取消经 [TaskUseCases.cancel]（GLOSSARY：取消待办保留记录并停止提醒，不是删除）；
  *   待办/便签/日程删除分别经各自 trash 入口进入回收站（可恢复，不永久删除）。
+ * 重复/子任务执行全部复用上述既有真实入口，不另建 AI 专用路径（验收第 5 条）。
  *
  * 目标定位（T21/#22）：修改/删除提案由模型给出定位线索（target.title，用户原话中的名称），
  * 落库前在设备端经 [AiProposalTargetMatcher] 从真实仓库只读匹配：
@@ -68,6 +78,10 @@ class AiProposalUseCases(
     // T28/#29 纯新增：长期记忆真实入口（仅确认执行分支调用；可空默认值保持既有构造零回归，
     // 生产装配必须传入，缺省时记忆提案确认返回中文错误、绝不静默丢失）
     private val memoryUseCases: MemoryUseCases? = null,
+    // T22/#23 纯新增：重复规则与子任务真实入口（仅确认执行分支调用；可空默认值保持既有构造
+    // 零回归，生产装配必须传入；缺省时重复/子任务提案确认返回中文错误、绝不静默丢失）
+    private val recurrenceUseCases: RecurrenceUseCases? = null,
+    private val subTaskUseCases: SubTaskUseCases? = null,
     private val idGen: () -> String,
     private val now: () -> Long,
     // 创建时区（提案截止/日程起止换算基准）；公开供提案卡片按同一时区渲染可读时间
@@ -150,11 +164,12 @@ class AiProposalUseCases(
             }
             val noun = kindCn(item.kind)
             when (val match = targetMatcher.match(item.kind, item.targetTitle)) {
-                is AiProposalTargetMatch.Unique -> prepared += item.copy(
-                    candidates = listOf(match.record),
-                    targetRecordId = match.record.recordId,
-                    targetRecord = match.record,
-                )
+                is AiProposalTargetMatch.Unique -> {
+                    // T22/#23：唯一候选绑定后判定重复范围（未说明先澄清；仅本次校验出现日）
+                    val scoped = prepareScopedTarget(session.id, item, match.record)
+                    scoped.onFailure { error -> return Result.failure(error) }
+                    prepared += scoped.getOrThrow()
+                }
                 is AiProposalTargetMatch.Multiple -> prepared += item.copy(candidates = match.candidates)
                 is AiProposalTargetMatch.NotFound -> {
                     val reason = "没有找到名称包含「${item.targetTitle}」的$noun：" +
@@ -171,6 +186,66 @@ class AiProposalUseCases(
             }
         }
         return Result.success(prepared)
+    }
+
+    /**
+     * 唯一候选绑定 + 重复范围校验（T22/#23）：
+     * - 非重复待办/删除（回收站）：范围字段无意义，清空后不展示；
+     * - 重复待办的修改或取消未说明范围：不落提案，中文追问「仅本次还是本次及以后」
+     *   （验收第 2 条：未说明范围时先澄清，绝不静默改整组）；
+     * - 「仅本次」必须指明是哪一次出现，且该日期须按当前规则确实是一次出现；
+     * - 其余非法（如仅本次改标题）由 [validateProposalItem] 统一拦截。
+     */
+    private suspend fun prepareScopedTarget(
+        sessionId: String,
+        item: AiProposalItem,
+        record: AiProposalTargetRecord,
+    ): Result<AiProposalItem> {
+        val bound = item.copy(
+            candidates = listOf(record),
+            targetRecordId = record.recordId,
+            targetRecord = record,
+        )
+        val normalized = normalizeScopeForRecord(bound, record)
+        validateProposalItem(normalized)?.let { problem ->
+            val reason = "该提案还不能执行：$problem。请补充说明后再试；本次未创建提案，未改动任何记录。"
+            appendFollowUp(sessionId, reason)
+            return Result.failure(IllegalStateException(reason))
+        }
+        val row = record.recurrence
+        val needsScope = normalized.op == AiProposalOp.MODIFY ||
+            (normalized.op == AiProposalOp.DELETE && normalized.deleteAction == AiProposalDeleteAction.CANCEL)
+        if (row != null && needsScope) {
+            if (normalized.scope == null) {
+                val reason = "「${record.title}」是重复待办：修改或取消前需要明确范围——只改这一次选「仅本次」，" +
+                    "影响以后选「本次及以后」。请告诉我范围后我再起草提案；本次未创建提案，未改动任何记录。"
+                appendFollowUp(sessionId, reason)
+                return Result.failure(IllegalStateException(reason))
+            }
+            if (normalized.scope == AiProposalScope.THIS_OCCURRENCE) {
+                val rule = row.toRecurrenceRule()
+                val anchor = record.anchorEpochDay
+                val occurrence = normalized.occurrenceEpochDay
+                if (anchor == null || occurrence == null || !rule.occursByPatternOn(anchor, occurrence)) {
+                    val dateText = occurrence?.let { LocalDate.ofEpochDay(it).toString() } ?: "（未给出日期）"
+                    val reason = "按「${record.title}」当前的重复规则，$dateText 不是一次出现（或未说明是哪一次）：" +
+                        "请核对要调整的那一次是哪天；本次未创建提案，未改动任何记录。"
+                    appendFollowUp(sessionId, reason)
+                    return Result.failure(IllegalStateException(reason))
+                }
+            }
+        }
+        return Result.success(normalized)
+    }
+
+    /** 范围只对「重复待办的修改/取消」有意义；其余条目清空范围字段（避免误导展示）。 */
+    private fun normalizeScopeForRecord(item: AiProposalItem, record: AiProposalTargetRecord): AiProposalItem {
+        val recurring = item.kind == AiProposalKind.TASK && record.recurrence != null
+        val applicable = recurring && (
+            item.op == AiProposalOp.MODIFY ||
+                (item.op == AiProposalOp.DELETE && item.deleteAction == AiProposalDeleteAction.CANCEL)
+            )
+        return if (applicable) item else item.copy(scope = null, occurrenceEpochDay = null)
     }
 
     /** 目标类别对应的授权类别（#19 体系映射）。 */
@@ -228,6 +303,18 @@ class AiProposalUseCases(
                     return Result.failure(
                         IllegalStateException(
                             "还有 $unselected 项修改或删除未选择目标记录：请在提案卡片中点选后再确认，绝不猜测执行对象",
+                        ),
+                    )
+                }
+                // T22/#23：重复待办的修改/取消必须先选择范围（仅本次或本次及以后），绝不静默猜整组
+                val unscoped = claimed.items.count { needsScopeSelection(it) }
+                if (unscoped > 0) {
+                    store.transition(proposalId, setOf(AiProposalStatus.CONFIRMED)) {
+                        it.copy(status = AiProposalStatus.PENDING)
+                    }
+                    return Result.failure(
+                        IllegalStateException(
+                            "还有 $unscoped 项重复待办未选择范围：请在提案卡片中选择「仅本次」或「本次及以后」后再确认",
                         ),
                     )
                 }
@@ -307,19 +394,77 @@ class AiProposalUseCases(
         }
         val fresh = targetMatcher.loadRecord(item.kind, recordId)
             ?: return Result.failure(IllegalStateException("所选记录已不存在或已进回收站，请重新核对"))
+        val bound = normalizeScopeForRecord(
+            item.copy(targetRecordId = recordId, targetRecord = fresh),
+            fresh,
+        )
         val saved = store.transition(proposalId, setOf(AiProposalStatus.PENDING)) { proposal ->
             proposal.copy(
                 items = proposal.items.map { candidate ->
-                    if (candidate.id == itemId) {
-                        candidate.copy(targetRecordId = recordId, targetRecord = fresh)
-                    } else {
-                        candidate
-                    }
+                    if (candidate.id == itemId) bound else candidate
                 },
             )
         } ?: return Result.failure(IllegalStateException("该提案已被确认或忽略"))
         return Result.success(saved)
     }
+
+    /**
+     * 选择重复待办的修改/取消范围（T22/#23，验收第 2 条）：
+     * - 仅 PENDING 提案、仅已绑定重复待办目标的修改/取消可选；
+     * - 「仅本次」必须已指明出现日期（解析层保证），且单次修改只支持延期到另一天——
+     *   要改标题、规则或子任务须选「本次及以后」（不静默改成整组）；
+     * - 重复选择以最后一次为准。选择本身不写任何业务仓库。
+     */
+    suspend fun selectProposalScope(
+        proposalId: String,
+        itemId: String,
+        scope: AiProposalScope,
+    ): Result<AiProposal> {
+        val current = store.load().find { it.id == proposalId }
+            ?: return Result.failure(IllegalStateException("操作提案不存在或已清除"))
+        if (current.status != AiProposalStatus.PENDING) {
+            return Result.failure(IllegalStateException("该提案已确认或已失效，不能再选择范围"))
+        }
+        val item = current.items.find { it.id == itemId }
+            ?: return Result.failure(IllegalStateException("提案条目不存在或已移除"))
+        if (item.op == AiProposalOp.CREATE) {
+            return Result.failure(IllegalStateException("新增条目无需选择范围"))
+        }
+        val target = item.targetRecord
+            ?: return Result.failure(IllegalStateException("请先点选目标记录，再选择修改范围"))
+        if (item.kind != AiProposalKind.TASK || target.recurrence == null) {
+            return Result.failure(IllegalStateException("目标不是重复待办，无需选择仅本次或本次及以后"))
+        }
+        if (item.op == AiProposalOp.DELETE && item.deleteAction != AiProposalDeleteAction.CANCEL) {
+            return Result.failure(IllegalStateException("整条删除没有仅本次或本次及以后的范围"))
+        }
+        if (scope == AiProposalScope.THIS_OCCURRENCE) {
+            if (item.occurrenceEpochDay == null) {
+                return Result.failure(IllegalStateException("「仅本次」需要指明是哪一次出现（日期）"))
+            }
+            if (item.op == AiProposalOp.MODIFY && !(item.changes?.let { isSingleOccurrencePostpone(it) } == true)) {
+                return Result.failure(
+                    IllegalStateException("「仅本次」只支持把这一次延期到另一天；修改标题、规则或子任务请选择「本次及以后」"),
+                )
+            }
+        }
+        val saved = store.transition(proposalId, setOf(AiProposalStatus.PENDING)) { proposal ->
+            proposal.copy(
+                items = proposal.items.map { candidate ->
+                    if (candidate.id == itemId) candidate.copy(scope = scope) else candidate
+                },
+            )
+        } ?: return Result.failure(IllegalStateException("该提案已被确认或忽略"))
+        return Result.success(saved)
+    }
+
+    /** 该条目是否仍需选择范围（重复待办的修改/取消且尚未选择）。 */
+    private fun needsScopeSelection(item: AiProposalItem): Boolean =
+        item.op != AiProposalOp.CREATE && item.kind == AiProposalKind.TASK &&
+            item.targetRecord?.recurrence != null &&
+            (item.op == AiProposalOp.MODIFY ||
+                (item.op == AiProposalOp.DELETE && item.deleteAction == AiProposalDeleteAction.CANCEL)) &&
+            item.scope == null
 
     // ---------- 确认执行 ----------
 
@@ -342,10 +487,12 @@ class AiProposalUseCases(
         claimed.items.forEachIndexed { index, item ->
             val label = "第${index + 1}项"
             val targetName = item.targetRecord?.title ?: item.title
+            val dependency = dependencyProblem(item)
             val outcome: Result<CreatedRecord> = try {
-                when (item.op) {
+                if (dependency != null) Result.failure(IllegalStateException(dependency)) else when (item.op) {
                     AiProposalOp.CREATE -> when (item.kind) {
-                        AiProposalKind.TASK -> taskUseCases.create(item.toTaskInput(zoneId)).map { CreatedRecord(it.id) }
+                        // T22/#23：重复规则与子任务经既有真实入口落地（Task/Recurrence/SubTask）
+                        AiProposalKind.TASK -> createTaskWithRecurrenceAndSteps(item)
                         AiProposalKind.NOTE -> noteUseCases.create(item.toNoteInput()).map { CreatedRecord(it.id) }
                         AiProposalKind.SCHEDULE -> createScheduleWithReminders(item).map { (id, suffix) ->
                             CreatedRecord(id, suffix)
@@ -368,7 +515,7 @@ class AiProposalUseCases(
                         AiProposalOp.CREATE -> when (item.kind) {
                             AiProposalKind.TASK -> {
                                 taskIds += created.id
-                                okLines += "$label 待办「${item.title}」已创建（记录 id=${created.id}）"
+                                okLines += "$label 待办「${item.title}」已创建（记录 id=${created.id}）${created.detail.orEmpty()}"
                             }
                             AiProposalKind.NOTE -> {
                                 noteIds += created.id
@@ -384,15 +531,23 @@ class AiProposalUseCases(
                             }
                         }
                         AiProposalOp.MODIFY -> {
-                            // 回执与卡片预览同一口径（旧值 → 新值）
-                            val changeLines = proposalChangePreviewLines(item, zoneId)
-                            val changeText = if (changeLines.isEmpty()) "无字段变化" else changeLines.joinToString("；")
-                            okLines += "$label ${kindCn(item.kind)}「$targetName」已修改（$changeText；记录 id=${created.id}）"
+                            if (item.scope == AiProposalScope.THIS_OCCURRENCE) {
+                                // 单次延期回执：只说这一次，不虚称规则/模板被修改
+                                okLines += "$label ${kindCn(item.kind)}「$targetName」已单次延期" +
+                                    "（${created.detail.orEmpty()}；记录 id=${created.id}）"
+                            } else {
+                                // 回执与卡片预览同一口径（旧值 → 新值）；重复/子任务变更附加在后
+                                val changeLines = proposalChangePreviewLines(item, zoneId)
+                                val changeText = if (changeLines.isEmpty()) "无字段变化" else changeLines.joinToString("；")
+                                val extra = created.detail?.let { "；$it" }.orEmpty()
+                                okLines += "$label ${kindCn(item.kind)}「$targetName」已修改（$changeText$extra；记录 id=${created.id}）"
+                            }
                         }
                         AiProposalOp.DELETE -> okLines += when {
                             item.kind == AiProposalKind.TASK &&
                                 item.deleteAction == AiProposalDeleteAction.CANCEL ->
-                                "$label 待办「$targetName」已取消（记录保留、其提醒已停止，不是删除；记录 id=${created.id}）"
+                                "$label 待办「$targetName」已取消（记录保留、其提醒已停止，不是删除" +
+                                    "${created.detail?.let { "；$it" }.orEmpty()}；记录 id=${created.id}）"
                             else ->
                                 "$label ${kindCn(item.kind)}「$targetName」已移入回收站（可恢复；记录 id=${created.id}）"
                         }
@@ -428,6 +583,10 @@ class AiProposalUseCases(
             ?: return Result.failure(IllegalStateException("目标记录未选择"))
         val changes = item.changes
             ?: return Result.failure(IllegalStateException("缺少变更内容"))
+        // T22/#23 仅本次：单次延期（不改规则几何、不挪动后续日期、不改写过去记录）
+        if (item.scope == AiProposalScope.THIS_OCCURRENCE) {
+            return postponeSingleOccurrence(item, targetId)
+        }
         item.targetRecord?.let { snap ->
             val fresh = targetMatcher.loadRecord(item.kind, targetId)
             when {
@@ -448,12 +607,24 @@ class AiProposalUseCases(
         }
     }
 
-    /** 待办修改：字段经 [TaskUseCases.update]；完成状态变更经 [TaskUseCases.complete]（重复待办走出现维度）。 */
+    /**
+     * 待办修改（T22/#23 扩展「本次及以后」）：字段经 [TaskUseCases.update]（未提及字段保持原值），
+     * 重复规则经 [RecurrenceUseCases.update]/[RecurrenceUseCases.remove]，
+     * 子任务步骤经 [SubTaskUseCases.create] 追加，完成状态经 [TaskUseCases.complete]。
+     * 全部走既有真实入口；过去各次出现记录不被删除或改写（验收第 3 条）。
+     */
     private suspend fun modifyTask(targetId: String, changes: AiProposalChanges): Result<CreatedRecord> {
         val current = taskUseCases.get(targetId)
             ?: return Result.failure(IllegalStateException("目标记录不存在或已删除"))
         if (current.trashedAt != null) {
             return Result.failure(IllegalStateException("目标记录已进回收站，请先恢复再操作"))
+        }
+        // 先确认所需的真实入口已装配，避免字段已改而规则/子任务静默丢失
+        if ((changes.recurrence != null || changes.clearRecurrence) && recurrenceUseCases == null) {
+            return Result.failure(IllegalStateException("重复规则入口未配置，无法修改重复规则"))
+        }
+        if (changes.addSubTasks.isNotEmpty() && subTaskUseCases == null) {
+            return Result.failure(IllegalStateException("子任务入口未配置，无法新增子任务"))
         }
         taskUseCases.update(
             targetId,
@@ -469,6 +640,30 @@ class AiProposalUseCases(
                 recurrenceRule = current.recurrenceRule,
             ),
         ).getOrElse { return Result.failure(it) }
+        val notes = mutableListOf<String>()
+        if (changes.clearRecurrence) {
+            val recurrence = recurrenceUseCases!!
+            recurrence.remove(targetId).getOrElse { return Result.failure(it) }
+            notes += "已移除重复规则"
+        }
+        changes.recurrence?.let { spec ->
+            val recurrence = recurrenceUseCases!!
+            recurrence.update(targetId, spec.toRecurrenceRule()).getOrElse { return Result.failure(it) }
+            notes += "重复规则已更新为：${recurrenceSummaryText(spec)}"
+        }
+        if (changes.addSubTasks.isNotEmpty()) {
+            val subTasks = subTaskUseCases!!
+            var created = 0
+            changes.addSubTasks.forEach { title ->
+                subTasks.create(targetId, title).getOrElse { error ->
+                    return Result.failure(
+                        IllegalStateException("子任务「$title」创建失败：${error.message ?: "未知原因"}"),
+                    )
+                }
+                created++
+            }
+            notes += "新增子任务 $created 项（本次及以后按新步骤清单执行）"
+        }
         if (changes.completed != null) {
             taskUseCases.complete(targetId, changes.completed).getOrElse { error ->
                 return Result.failure(
@@ -476,7 +671,29 @@ class AiProposalUseCases(
                 )
             }
         }
-        return Result.success(CreatedRecord(targetId))
+        return Result.success(CreatedRecord(targetId, notes.joinToString("；").ifEmpty { null }))
+    }
+
+    /**
+     * 「仅本次」修改 = 单次延期（T22/#23，验收第 3 条）：把 [AiProposalItem.occurrenceEpochDay]
+     * 这一次的生效日移到 changes.dueEpochDay，经 [RecurrenceUseCases.postponeOccurrence] 执行——
+     * 不改变规则几何、不挪动后续日期；目标日已有出现时同日两次（由既有出现行语义表达）；
+     * 已完成的出现与过去记录不被改写（真实入口拒绝并中文说明）。
+     */
+    private suspend fun postponeSingleOccurrence(item: AiProposalItem, targetId: String): Result<CreatedRecord> {
+        val recurrence = recurrenceUseCases
+            ?: return Result.failure(IllegalStateException("重复规则入口未配置，无法执行单次延期"))
+        val occurrence = item.occurrenceEpochDay
+            ?: return Result.failure(IllegalStateException("「仅本次」缺少出现日期"))
+        val to = item.changes?.dueEpochDay
+            ?: return Result.failure(IllegalStateException("「仅本次」只支持把这一次延期到另一天"))
+        recurrence.postponeOccurrence(targetId, occurrence, to).getOrElse { return Result.failure(it) }
+        return Result.success(
+            CreatedRecord(
+                targetId,
+                "原日期 ${LocalDate.ofEpochDay(occurrence)} 这一次移到 ${LocalDate.ofEpochDay(to)}，后续日期不变",
+            ),
+        )
     }
 
     /** 便签修改：清单未变更时保留原清单项（含 id 与勾选状态）；变更时整体替换（预览已明确标注）。 */
@@ -528,9 +745,34 @@ class AiProposalUseCases(
     private suspend fun executeDelete(item: AiProposalItem): Result<CreatedRecord> {
         val targetId = item.targetRecordId
             ?: return Result.failure(IllegalStateException("目标记录未选择"))
+        // T22/#23 取消「仅本次」：跳过该次出现（例外日），不改变其余日期与既有记录
+        if (item.kind == AiProposalKind.TASK && item.deleteAction == AiProposalDeleteAction.CANCEL &&
+            item.scope == AiProposalScope.THIS_OCCURRENCE
+        ) {
+            val recurrence = recurrenceUseCases
+                ?: return Result.failure(IllegalStateException("重复规则入口未配置，无法跳过本次出现"))
+            val occurrence = item.occurrenceEpochDay
+                ?: return Result.failure(IllegalStateException("「仅本次」缺少出现日期"))
+            recurrence.skipOccurrence(targetId, occurrence).getOrElse { return Result.failure(it) }
+            return Result.success(
+                CreatedRecord(
+                    targetId,
+                    "本次（${LocalDate.ofEpochDay(occurrence)}）已跳过：该日不再出现、不再要求完成，其余日期与既有记录不变",
+                ),
+            )
+        }
         return when (item.kind) {
             AiProposalKind.TASK -> when (item.deleteAction) {
-                AiProposalDeleteAction.CANCEL -> taskUseCases.cancel(targetId).map { CreatedRecord(targetId) }
+                AiProposalDeleteAction.CANCEL -> taskUseCases.cancel(targetId).map {
+                    CreatedRecord(
+                        targetId,
+                        if (item.scope == AiProposalScope.THIS_AND_FUTURE) {
+                            "本次及以后：整组已取消，过去各次记录保留"
+                        } else {
+                            null
+                        },
+                    )
+                }
                 AiProposalDeleteAction.TRASH -> taskUseCases.trash(targetId).map { CreatedRecord(targetId) }
                 null -> Result.failure(IllegalStateException("待办删除缺少动作"))
             }
@@ -550,6 +792,61 @@ class AiProposalUseCases(
         val memories = memoryUseCases
             ?: return Result.failure(IllegalStateException("记忆保存入口未配置，无法保存该条记忆"))
         return memories.create(item.toMemoryInput(), MemorySource.CHAT).map { CreatedRecord(it.id) }
+    }
+
+    /**
+     * 创建待办条目（T22/#23）：先经 [TaskUseCases.create] 创建真实待办，有重复规则时经
+     * [RecurrenceUseCases.create]，子任务步骤逐条经 [SubTaskUseCases.create]——全部走既有真实入口，
+     * 不另建 AI 重复/父子路径。重复规则或子任务设置失败时如实写进回执后缀（待办本身已创建，
+     * 与日程提醒的部分成功语义一致），绝不虚报。
+     */
+    private suspend fun createTaskWithRecurrenceAndSteps(item: AiProposalItem): Result<CreatedRecord> {
+        val task = try {
+            taskUseCases.create(item.toTaskInput(zoneId)).getOrElse { return Result.failure(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            return Result.failure(e)
+        }
+        val notes = mutableListOf<String>()
+        item.recurrence?.let { spec ->
+            val recurrence = recurrenceUseCases
+            if (recurrence == null) {
+                notes += "重复规则设置失败：入口未配置"
+            } else {
+                try {
+                    recurrence.create(task.id, spec.toRecurrenceRule())
+                        .onSuccess { notes += "重复规则：${recurrenceSummaryText(spec)}" }
+                        .onFailure { e -> notes += "重复规则设置失败：${e.message ?: "未知原因"}" }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    notes += "重复规则设置失败：${e.message ?: "未知原因"}"
+                }
+            }
+        }
+        if (item.subTasks.isNotEmpty()) {
+            val subTasks = subTaskUseCases
+            if (subTasks == null) {
+                notes += "子任务创建失败：入口未配置"
+            } else {
+                var created = 0
+                item.subTasks.forEach { title ->
+                    try {
+                        subTasks.create(task.id, title)
+                            .onSuccess { created++ }
+                            .onFailure { e -> notes += "子任务「$title」创建失败：${e.message ?: "未知原因"}" }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        notes += "子任务「$title」创建失败：${e.message ?: "未知原因"}"
+                    }
+                }
+                if (created > 0) notes += "子任务 $created 项"
+            }
+        }
+        val detail = notes.joinToString("；").let { if (it.isEmpty()) "" else "；$it" }
+        return Result.success(CreatedRecord(task.id, detail))
     }
 
     /**
@@ -591,8 +888,35 @@ class AiProposalUseCases(
         )
     }
 
-    /** 确认执行的单条创建结果：记录 id + 可选回执后缀（仅日程条目携带提醒说明）。 */
+    /** 确认执行的单条创建结果：记录 id + 可选回执后缀（日程提醒/重复规则/子任务等如实说明）。 */
     private data class CreatedRecord(val id: String, val detail: String? = null)
+
+    /**
+     * 确认执行所需的真实入口是否已装配（T22/#23）：缺省时该条中文失败，
+     * 绝不静默丢弃重复规则或子任务信息（生产装配 AppContainer 必传）。
+     */
+    private fun dependencyProblem(item: AiProposalItem): String? = when {
+        item.op == AiProposalOp.CREATE && item.kind == AiProposalKind.TASK &&
+            item.recurrence != null && recurrenceUseCases == null ->
+            "重复规则入口未配置，无法保存重复规则"
+        item.op == AiProposalOp.CREATE && item.kind == AiProposalKind.TASK &&
+            item.subTasks.isNotEmpty() && subTaskUseCases == null ->
+            "子任务入口未配置，无法保存子任务"
+        item.op == AiProposalOp.MODIFY &&
+            (item.changes?.recurrence != null || item.changes?.clearRecurrence == true) &&
+            recurrenceUseCases == null ->
+            "重复规则入口未配置，无法修改重复规则"
+        item.op == AiProposalOp.MODIFY && !item.changes?.addSubTasks.isNullOrEmpty() &&
+            subTaskUseCases == null ->
+            "子任务入口未配置，无法新增子任务"
+        item.op == AiProposalOp.MODIFY && item.scope == AiProposalScope.THIS_OCCURRENCE &&
+            recurrenceUseCases == null ->
+            "重复规则入口未配置，无法执行单次延期"
+        item.op == AiProposalOp.DELETE && item.scope == AiProposalScope.THIS_OCCURRENCE &&
+            recurrenceUseCases == null ->
+            "重复规则入口未配置，无法跳过本次出现"
+        else -> null
+    }
 
     /**
      * 回执文案：成功、部分失败、全部失败都如实说明，绝不虚报（issue #20/#22 验收）。
