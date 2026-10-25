@@ -46,6 +46,7 @@ import com.zhideer.app.domain.model.AiProposalDeleteAction
 import com.zhideer.app.domain.model.AiProposalItem
 import com.zhideer.app.domain.model.AiProposalKind
 import com.zhideer.app.domain.model.AiProposalOp
+import com.zhideer.app.domain.model.AiProposalScope
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalStatus
 import com.zhideer.app.domain.usecase.AdvisorSuggestion
@@ -61,8 +62,12 @@ import com.zhideer.app.domain.usecase.memoryTypeCn
 import com.zhideer.app.domain.usecase.proposalChangePreviewLines
 import com.zhideer.app.domain.usecase.proposalDeleteActionText
 import com.zhideer.app.domain.usecase.proposalDueText
+import com.zhideer.app.domain.usecase.proposalNeedsScope
+import com.zhideer.app.domain.usecase.proposalRecurrenceLines
 import com.zhideer.app.domain.usecase.proposalReminderText
 import com.zhideer.app.domain.usecase.proposalScheduleRangeText
+import com.zhideer.app.domain.usecase.proposalScopeNotice
+import com.zhideer.app.domain.usecase.proposalScopeText
 import com.zhideer.app.domain.usecase.proposalTargetSummary
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -75,7 +80,7 @@ private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
  * AI 助手主界面（T17/#18、T18/#19、T19/#20、T20/#21、T21/#22），公开供根导航挂载：
  * - 会话列表 + 新建会话 + 重开 + 删除；
  * - 聊天视图：多轮流式回复、发送/停止、生成中可取消；
- * - 创建模式（#20/#21/#22/#29）：开启后发送走提案路径——AI 起草待办/便签/日程的新增、修改与删除，
+ * - 创建模式（#20/#21/#22/#23/#29）：开启后发送走提案路径——AI 起草待办/便签/日程的新增、修改与删除，
  *   以及「记住」类长期记忆的操作提案（T28/#29：确认前绝不写入记忆表，确认后以聊天确认来源保存），
  *   提案以卡片呈现在对话流中（完整字段预览 + 「确认创建/确认执行」「忽略」与逐项「移除」），
  *   日程卡片显示按创建时区换算的时间范围（跨日明确显示）、地点/分类/备注与提醒摘要（无提醒明确标注）；
@@ -83,6 +88,9 @@ private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
  *   （GLOSSARY：取消待办保留记录并停止提醒，不是删除）；修改/删除需读取本地数据定位目标，
  *   未授权对应类别时提示先授权；多候选时列出候选供点选（点选哪条就是哪条，未点选不可确认），
  *   匹配不到时由 AI 追问；确认前绝不写入业务数据，确认后回执含记录标识写回对话；
+ *   重复待办提案显示每日/每周/每月规则、月末处理、例外日期与子任务步骤（T22/#23），
+ *   修改/取消重复待办须选择「仅本次/本次及以后」（仅本次只支持单次延期或跳过该次），
+ *   重复待办的重复规则与子任务确认后经 Recurrence/SubTask 真实入口落地；
  * - 授权面板（#19，T28/#29 扩展记忆）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签/记忆），
  *   各类别独立勾选、整体确认授权、可随时撤销；记忆默认关闭，勾选后仅活动记忆随请求外发；
  *   对话页显示"已授权范围"徽标；
@@ -266,6 +274,13 @@ fun AiScreen(
                             .onFailure { e -> error = e.message }
                     }
                 },
+                // T22/#23：重复待办的修改/取消范围选择（仅本次/本次及以后），选择本身不写业务数据
+                onSelectProposalScope = { proposalId, itemId, proposalScope ->
+                    scope.launch {
+                        proposalUseCases.selectProposalScope(proposalId, itemId, proposalScope)
+                            .onFailure { e -> error = e.message }
+                    }
+                },
                 modifier = Modifier.fillMaxSize().padding(padding),
                 error = error,
             )
@@ -364,6 +379,7 @@ private fun ChatView(
     onDismissProposal: (String) -> Unit,
     onRemoveProposalItem: (String, String) -> Unit,
     onSelectProposalTarget: (String, String, String) -> Unit,
+    onSelectProposalScope: (String, String, AiProposalScope) -> Unit,
     modifier: Modifier = Modifier,
     error: String?,
 ) {
@@ -395,6 +411,9 @@ private fun ChatView(
                     onRemoveItem = { itemId -> onRemoveProposalItem(proposal.id, itemId) },
                     onSelectTarget = { itemId, recordId ->
                         onSelectProposalTarget(proposal.id, itemId, recordId)
+                    },
+                    onSelectScope = { itemId, scope ->
+                        onSelectProposalScope(proposal.id, itemId, scope)
                     },
                 )
             }
@@ -727,10 +746,13 @@ private fun ProposalCard(
     onDismiss: () -> Unit,
     onRemoveItem: (String) -> Unit,
     onSelectTarget: (itemId: String, recordId: String) -> Unit,
+    onSelectScope: (itemId: String, scope: AiProposalScope) -> Unit,
 ) {
     // T21/#22：含修改/删除条目时按钮文案与语义不同；有条目未点选目标时禁止确认（用例层同样拦截）
     val hasModifyDelete = proposal.items.any { it.op != AiProposalOp.CREATE }
     val pendingSelection = proposal.items.any { it.op != AiProposalOp.CREATE && it.targetRecordId == null }
+    // T22/#23：重复待办的修改/取消必须先选择范围（仅本次或本次及以后）才能确认
+    val pendingScope = proposal.items.any { proposalNeedsScope(it) && it.scope == null }
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = MaterialTheme.shapes.medium,
@@ -757,6 +779,7 @@ private fun ProposalCard(
                     removable = proposal.status == AiProposalStatus.PENDING && !busy,
                     onRemove = { onRemoveItem(item.id) },
                     onSelectTarget = { recordId -> onSelectTarget(item.id, recordId) },
+                    onSelectScope = { scope -> onSelectScope(item.id, scope) },
                 )
             }
             proposal.resultMessage?.let { receipt ->
@@ -776,8 +799,16 @@ private fun ProposalCard(
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
+                if (pendingScope) {
+                    Text(
+                        "重复待办的修改或取消需要先选择范围（仅本次或本次及以后）：请在上方条目中选择，绝不静默改动整组。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 Row(modifier = Modifier.padding(top = 8.dp)) {
-                    Button(onClick = onConfirm, enabled = !busy && !pendingSelection) {
+                    Button(onClick = onConfirm, enabled = !busy && !pendingSelection && !pendingScope) {
                         Text(
                             when {
                                 busy -> if (hasModifyDelete) "执行中…" else "创建中…"
@@ -818,6 +849,7 @@ private fun ProposalItemRow(
     removable: Boolean,
     onRemove: () -> Unit,
     onSelectTarget: (recordId: String) -> Unit,
+    onSelectScope: (AiProposalScope) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -875,6 +907,8 @@ private fun ProposalItemRow(
                         add("优先级：${priorityCn(item.priority)}")
                         if (item.category.isNotBlank()) add("分类：${item.category}")
                         if (item.note.isNotBlank()) add("备注：${item.note}")
+                        // T22/#23：重复规则、月末处理、例外日期与子任务步骤在提案中完整可见
+                        addAll(proposalRecurrenceLines(item))
                     }
                     AiProposalKind.NOTE -> {
                         if (item.content.isNotBlank()) add("正文：${item.content}")
@@ -907,6 +941,43 @@ private fun ProposalItemRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
+        }
+        // T22/#23：重复待办的修改/取消必须选择范围；仅本次只支持单次延期，其余须本次及以后
+        if (proposalNeedsScope(item)) {
+            Text(
+                if (item.op == AiProposalOp.MODIFY) "修改范围：" else "取消范围：",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    onClick = { onSelectScope(AiProposalScope.THIS_OCCURRENCE) },
+                    enabled = item.occurrenceEpochDay != null,
+                ) {
+                    Text(if (item.scope == AiProposalScope.THIS_OCCURRENCE) "✓ 仅本次" else "仅本次")
+                }
+                OutlinedButton(
+                    onClick = { onSelectScope(AiProposalScope.THIS_AND_FUTURE) },
+                    modifier = Modifier.padding(start = 8.dp),
+                ) {
+                    Text(if (item.scope == AiProposalScope.THIS_AND_FUTURE) "✓ 本次及以后" else "本次及以后")
+                }
+            }
+            proposalScopeText(item)?.let {
+                Text(
+                    "当前范围：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+            proposalScopeNotice(item)?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
         }
     }
 }
