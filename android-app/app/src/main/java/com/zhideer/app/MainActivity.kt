@@ -68,6 +68,7 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     calendarUseCases = container.calendarUseCases,
                     reminderUseCases = container.reminderUseCases,
                     recurrenceUseCases = container.recurrenceUseCases,
+                    occurrenceSubTaskUseCases = container.occurrenceSubTaskUseCases,
                 )
                 Tab.CALENDAR -> CalendarScreen(
                     useCases = container.calendarUseCases,

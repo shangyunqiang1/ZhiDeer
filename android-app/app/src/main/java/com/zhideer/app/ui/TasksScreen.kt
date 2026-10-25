@@ -60,6 +60,7 @@ fun TasksScreen(
     calendarUseCases: CalendarUseCases,
     reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
     recurrenceUseCases: com.zhideer.app.domain.usecase.RecurrenceUseCases,
+    occurrenceSubTaskUseCases: com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases,
 ) {
     val scope = rememberCoroutineScope()
     var filter by remember { mutableStateOf(TaskFilter.TODAY) }
@@ -176,6 +177,7 @@ fun TasksScreen(
             calendarUseCases = calendarUseCases,
             reminderUseCases = reminderUseCases,
             recurrenceUseCases = recurrenceUseCases,
+            occurrenceSubTaskUseCases = occurrenceSubTaskUseCases,
             onDismiss = { viewing = null },
             onEdit = { viewing = null; editing = task },
             onPostponeTomorrow = {
