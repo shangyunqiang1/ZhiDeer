@@ -33,6 +33,7 @@ import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiProposalTargetMatcher
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.BackupUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.MemoryUseCases
@@ -267,10 +268,18 @@ class AppContainer(
         )
     }
 
+    // —— T31/#32 手动加密备份导出：纯新增装配 ——
+    // 会话历史 DataStore 实例提升为容器级共享：同一文件只能存在一个单进程 DataStore
+    // （AiSessionStore 的 createSingleProcessCoordinator 约束），AI 对话与备份共用同一实例，
+    // 行为不变（仍读写同一文件）。
+    val aiSessionStore: AiSessionStore by lazy {
+        AiSessionStore(File(context.filesDir, "ai_chat_sessions.preferences_pb"))
+    }
+
     val aiChatUseCases: AiChatUseCases by lazy {
         AiChatUseCases(
             configStore = aiConfigStore,
-            sessionStore = AiSessionStore(File(context.filesDir, "ai_chat_sessions.preferences_pb")),
+            sessionStore = aiSessionStore,
             client = aiChatClient,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
@@ -313,6 +322,24 @@ class AppContainer(
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,
+        )
+    }
+
+    // —— T31/#32 手动加密备份导出：纯新增装配 ——
+    // 备份走 BackupUseCases 统一入口：Room 全部用户数据表 + 会话历史（共享 aiSessionStore），
+    // 绝不触碰 aiConfigStore（API Key 安全边界，见 BackupUseCases 说明）。
+    // MVP 导出位置为应用外部文件目录（展示绝对路径）；SAF「另存为」由后续任务补齐。
+    val backupExportDirectory: File by lazy {
+        (context.getExternalFilesDir(null) ?: File(context.filesDir, "backups"))
+            .apply { if (!isDirectory) mkdirs() }
+    }
+
+    val backupUseCases: BackupUseCases by lazy {
+        BackupUseCases(
+            database = database,
+            sessionHistory = { aiSessionStore.load() },
+            ioDispatcher = ioDispatcher,
+            now = nowMillis,
         )
     }
 }
