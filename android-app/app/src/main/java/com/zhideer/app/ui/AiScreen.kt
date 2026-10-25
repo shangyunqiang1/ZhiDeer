@@ -1,8 +1,11 @@
 package com.zhideer.app.ui
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -27,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,6 +43,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import android.Manifest
+import android.content.pm.PackageManager
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
 import com.zhideer.app.domain.model.AiProposal
@@ -57,6 +72,10 @@ import com.zhideer.app.domain.usecase.AiConfigInput
 import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.AiContextGrant
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.VoiceInputController
+import com.zhideer.app.domain.usecase.VoiceInputState
+import com.zhideer.app.domain.usecase.VoicePlaybackController
+import com.zhideer.app.domain.usecase.VoicePlaybackState
 import com.zhideer.app.domain.usecase.kindCn
 import com.zhideer.app.domain.usecase.memoryTypeCn
 import com.zhideer.app.domain.usecase.proposalChangePreviewLines
@@ -97,6 +116,10 @@ private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
  *   已授权时普通发送走 [AiChatUseCases.sendWithAuthorizedContext]，未授权回退普通发送（不含本地数据）；
  *   新增提案只写不读，不需要授权（#20）；修改/删除提案的目标定位需要对应类别授权（#22）；
  * - 配置对话框：API Key（掩码输入、可切换显示）、模型标识、Base URL、「测试连接」。
+ * - 语音输入与中文播报（T23/#24）：按住说话、松手转写，录音/识别/已转写三态可见；
+ *   转写只填入输入框（可编辑），点击发送后才提交，与键盘文字共用同一条发送与提案确认路径；
+ *   无识别服务、麦克风拒绝、识别失败均中文提示并回退键盘；中文播报默认关闭、可开关、可随时停止，
+ *   缺引擎/中文不可用时保留文字并中文提示；退出聊天页停止录音并释放识别器与 TTS。
  * 全部文案为中文；错误提示来自用例层（已是中文可诊断文案）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -106,6 +129,9 @@ fun AiScreen(
     proposalUseCases: AiProposalUseCases,
     // T29/#30 纯新增：参谋建议入口（主动生成有依据的建议，采纳走既有提案状态机）
     advisorUseCases: AdvisorUseCases,
+    // T23/#24 纯新增：语音输入状态机与中文播报开关；UI 只做渲染与事件转发
+    voiceInput: VoiceInputController,
+    voicePlayback: VoicePlaybackController,
 ) {
     val scope = rememberCoroutineScope()
     val sessions by useCases.listSessions().collectAsState(initial = emptyList())
@@ -190,6 +216,9 @@ fun AiScreen(
                 onSend = {
                     val text = input
                     if (text.isNotBlank() && !generating) {
+                        // #24：语音转写只是输入框草稿，点击发送后才复位并提交；
+                        // 提交与键盘文字走完全相同的一条路径（含创建模式提案确认）
+                        voiceInput.onDraftSent()
                         input = ""
                         generating = true
                         streamingText = ""
@@ -222,6 +251,11 @@ fun AiScreen(
                                     session?.let {
                                         chatSessionId = it.id
                                         currentSession = it
+                                        // #24：播报默认关闭，仅在用户开启且引擎就绪时朗读最新中文回答；
+                                        // 播报失败只给中文提示，回答文字仍保留在会话中
+                                        it.messages.lastOrNull { message -> message.role == AiChatRole.ASSISTANT }?.let { message ->
+                                            voicePlayback.speakReply(message.content)
+                                        }
                                     }
                                 }
                                 .onFailure { e ->
@@ -281,6 +315,8 @@ fun AiScreen(
                             .onFailure { e -> error = e.message }
                     }
                 },
+                voiceInput = voiceInput,
+                voicePlayback = voicePlayback,
                 modifier = Modifier.fillMaxSize().padding(padding),
                 error = error,
             )
@@ -380,9 +416,64 @@ private fun ChatView(
     onRemoveProposalItem: (String, String) -> Unit,
     onSelectProposalTarget: (String, String, String) -> Unit,
     onSelectProposalScope: (String, String, AiProposalScope) -> Unit,
+    // T23/#24：语音输入与中文播报由状态机控制器承载，UI 只渲染状态与转发事件
+    voiceInput: VoiceInputController,
+    voicePlayback: VoicePlaybackController,
     modifier: Modifier = Modifier,
     error: String?,
 ) {
+    val context = LocalContext.current
+    val voiceState by voiceInput.state.collectAsState()
+    val playbackEnabled by voicePlayback.enabled.collectAsState()
+    val playbackState by voicePlayback.state.collectAsState()
+    // 系统识别优先：进入聊天页时探测一次；无服务时中文说明并保留键盘输入
+    val recognitionAvailable = remember { voiceInput.isRecognitionAvailable() }
+    var micPermissionGranted by remember {
+        mutableStateOf(
+            context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        micPermissionGranted = granted
+        if (!granted) {
+            // #24：拒绝麦克风时给中文提示，键盘输入始终可用
+            voiceInput.reportPermissionDenied()
+        }
+    }
+    // #24：转写结果只填入输入框（可编辑），绝不自动发送——提交只由点击发送触发
+    LaunchedEffect(voiceState) {
+        (voiceState as? VoiceInputState.Transcribed)?.let { transcribed ->
+            onInputChange(
+                if (input.isBlank()) transcribed.text else input.trimEnd() + "\n" + transcribed.text,
+            )
+        }
+    }
+    // #24：离开页面停止录音/播报并释放识别器与 TTS，不隐蔽录音、不常驻监听
+    DisposableEffect(Unit) {
+        voicePlayback.onPageEntered()
+        onDispose {
+            voiceInput.onPageExit()
+            voicePlayback.onPageExit()
+        }
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    // 切后台同样停止，回到前台不会保留任何进行中的录音
+                    voiceInput.onPageExit()
+                    voicePlayback.onPageExit()
+                }
+                Lifecycle.Event.ON_START -> voicePlayback.onPageEntered()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     Column(modifier) {
         error?.let {
             Text(
@@ -437,6 +528,65 @@ private fun ChatView(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+        // #24：录音/识别/已转写三态清晰可见；失败一律中文提示且键盘输入不受影响
+        val voiceStatusText: String? = when (val s = voiceState) {
+            is VoiceInputState.Recording ->
+                if (s.partialText.isBlank()) "录音中…松手转写" else "录音中：${s.partialText}"
+            is VoiceInputState.Recognizing -> "识别中…"
+            is VoiceInputState.Transcribed -> "已转写，可编辑后发送"
+            is VoiceInputState.Failed -> s.message
+            VoiceInputState.Idle -> null
+        }
+        voiceStatusText?.let { status ->
+            Text(
+                status,
+                color = if (voiceState is VoiceInputState.Failed) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+        if (!recognitionAvailable && voiceState !is VoiceInputState.Failed) {
+            Text(
+                "本机没有可用的语音识别服务，已回退键盘输入。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+        // #24：按住说话、松手转写。无识别服务时不申请权限，直接中文说明并回退键盘；
+        // 未授权时先申请麦克风权限，拒绝由状态机给中文提示（键盘输入始终可用）。
+        val voiceButtonShape = RoundedCornerShape(20.dp)
+        val micModifier = Modifier
+            .padding(start = 8.dp)
+            .clip(voiceButtonShape)
+            .border(1.dp, MaterialTheme.colorScheme.outline, voiceButtonShape)
+            .pointerInput(recognitionAvailable, micPermissionGranted, generating) {
+                detectTapGestures(
+                    onPress = {
+                        if (generating) return@detectTapGestures
+                        if (!recognitionAvailable) {
+                            voiceInput.startRecording()
+                            return@detectTapGestures
+                        }
+                        if (!micPermissionGranted) {
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            return@detectTapGestures
+                        }
+                        if (voiceInput.startRecording()) {
+                            // 松手才转写；手势取消不产生转写
+                            if (tryAwaitRelease()) {
+                                voiceInput.releaseAndTranscribe()
+                            } else {
+                                voiceInput.cancel()
+                            }
+                        }
+                    },
+                )
+            }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -444,10 +594,25 @@ private fun ChatView(
             OutlinedTextField(
                 value = input,
                 onValueChange = onInputChange,
-                label = { Text("输入消息") },
+                label = { Text("输入消息（可编辑语音转写）") },
                 modifier = Modifier.weight(1f),
                 enabled = !generating,
             )
+            // 用非 clickable 容器承载按住手势，避免与按钮自身点击手势争抢按下事件；
+            // 无识别服务与未授权路径同样可通过状态机给出中文提示。
+            Box(
+                modifier = micModifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    when (voiceState) {
+                        is VoiceInputState.Recording -> "松手转写"
+                        is VoiceInputState.Recognizing -> "识别中"
+                        else -> "按住说话"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
             if (generating) {
                 Button(onClick = onStop, modifier = Modifier.padding(start = 8.dp)) {
                     Text("停止")
@@ -456,6 +621,38 @@ private fun ChatView(
                 Button(onClick = onSend, modifier = Modifier.padding(start = 8.dp)) {
                     Text("发送")
                 }
+            }
+        }
+        // #24：中文播报默认关闭；可开关、可随时停止；缺引擎/中文不可用时保留文字并中文提示
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        ) {
+            Checkbox(checked = playbackEnabled, onCheckedChange = { voicePlayback.setEnabled(it) })
+            Text("播报中文回复（默认关闭）", style = MaterialTheme.typography.bodySmall)
+            when (val state = playbackState) {
+                VoicePlaybackState.Initializing -> Text(
+                    "  语音引擎初始化中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                is VoicePlaybackState.Unavailable -> Text(
+                    "  " + state.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                VoicePlaybackState.Ready -> Text(
+                    "  语音引擎就绪",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                VoicePlaybackState.Speaking -> OutlinedButton(
+                    onClick = { voicePlayback.stop() },
+                    modifier = Modifier.padding(start = 8.dp),
+                ) {
+                    Text("停止播报")
+                }
+                VoicePlaybackState.Disabled -> Unit
             }
         }
     }

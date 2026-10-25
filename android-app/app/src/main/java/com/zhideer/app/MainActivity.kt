@@ -137,6 +137,9 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     useCases = container.aiChatUseCases,
                     proposalUseCases = container.aiProposalUseCases,
                     advisorUseCases = container.advisorUseCases,
+                    // T23/#24：语音输入（无服务/权限拒绝时中文提示并按键盘回退）与中文播报（默认关闭）
+                    voiceInput = container.voiceInputController,
+                    voicePlayback = container.voicePlaybackController,
                 )
             }
         }
