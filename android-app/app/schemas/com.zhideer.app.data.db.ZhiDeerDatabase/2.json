@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 2,
-    "identityHash": "38b4fea30294dc8d4a6b978f474703e8",
+    "identityHash": "d82737ac40800211fb20924844912bbc",
     "entities": [
       {
         "tableName": "tasks",
@@ -101,8 +101,8 @@
         }
       },
       {
-        "tableName": "notes",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `content` TEXT NOT NULL, `tags` TEXT NOT NULL, `pinned` INTEGER NOT NULL, `trashedAt` INTEGER, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "tableName": "calendar_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `startMillis` INTEGER NOT NULL, `endMillis` INTEGER NOT NULL, `timezoneId` TEXT NOT NULL, `location` TEXT NOT NULL, `note` TEXT NOT NULL, `category` TEXT NOT NULL, `trashedAt` INTEGER, `zoneConfirmedAt` INTEGER, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -117,26 +117,49 @@
             "notNull": true
           },
           {
-            "fieldPath": "content",
-            "columnName": "content",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "tags",
-            "columnName": "tags",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "pinned",
-            "columnName": "pinned",
+            "fieldPath": "startMillis",
+            "columnName": "startMillis",
             "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endMillis",
+            "columnName": "endMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timezoneId",
+            "columnName": "timezoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "location",
+            "columnName": "location",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "note",
+            "columnName": "note",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
             "notNull": true
           },
           {
             "fieldPath": "trashedAt",
             "columnName": "trashedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "zoneConfirmedAt",
+            "columnName": "zoneConfirmedAt",
             "affinity": "INTEGER"
           },
           {
@@ -158,77 +181,11 @@
             "id"
           ]
         }
-      },
-      {
-        "tableName": "note_list_items",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `noteId` TEXT NOT NULL, `text` TEXT NOT NULL, `checked` INTEGER NOT NULL, `sortOrder` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`noteId`) REFERENCES `notes`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
-        "fields": [
-          {
-            "fieldPath": "id",
-            "columnName": "id",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "noteId",
-            "columnName": "noteId",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "text",
-            "columnName": "text",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "checked",
-            "columnName": "checked",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "sortOrder",
-            "columnName": "sortOrder",
-            "affinity": "INTEGER",
-            "notNull": true
-          }
-        ],
-        "primaryKey": {
-          "autoGenerate": false,
-          "columnNames": [
-            "id"
-          ]
-        },
-        "indices": [
-          {
-            "name": "index_note_list_items_noteId",
-            "unique": false,
-            "columnNames": [
-              "noteId"
-            ],
-            "orders": [],
-            "createSql": "CREATE INDEX IF NOT EXISTS `index_note_list_items_noteId` ON `${TABLE_NAME}` (`noteId`)"
-          }
-        ],
-        "foreignKeys": [
-          {
-            "table": "notes",
-            "onDelete": "CASCADE",
-            "onUpdate": "NO ACTION",
-            "columns": [
-              "noteId"
-            ],
-            "referencedColumns": [
-              "id"
-            ]
-          }
-        ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '38b4fea30294dc8d4a6b978f474703e8')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd82737ac40800211fb20924844912bbc')"
     ]
   }
 }

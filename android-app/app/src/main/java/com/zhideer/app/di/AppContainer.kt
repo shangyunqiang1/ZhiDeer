@@ -4,10 +4,13 @@ import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
+import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.TasksRepository
+import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
 import kotlinx.coroutines.Dispatchers
@@ -31,8 +34,9 @@ class AppContainer(
     )
         .setDriver(BundledSQLiteDriver())
         .setQueryCoroutineContext(Dispatchers.IO)
-        // T05/#6：数据库 1→2 新增便签表。当前应用尚无真实用户数据，先采用破坏性迁移兜底，
-        // 避免老版本库升级时崩溃；接入真实用户数据前必须替换为保留数据的正式迁移。
+        // T04/#5 与 T05/#6 合并后数据库为 1→2→3（日程表 + 便签表）。当前应用尚无对外发布的
+        // 真实用户数据，暂以破坏性迁移兜底（旧库重建，不保留历史数据）；
+        // 接入真实用户数据前必须替换为保留数据的正式迁移。
         .fallbackToDestructiveMigration()
         .build()
 
@@ -42,6 +46,15 @@ class AppContainer(
 
     val taskUseCases: TaskUseCases = TaskUseCases(
         repository = tasksRepository,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
+        zoneId = zoneId.id,
+    )
+
+    val calendarRepository: CalendarRepository = CalendarRepositoryImpl(database.calendarEntryDao(), Dispatchers.IO)
+
+    val calendarUseCases: CalendarUseCases = CalendarUseCases(
+        repository = calendarRepository,
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
         zoneId = zoneId.id,
