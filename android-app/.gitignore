@@ -1,0 +1,4 @@
+build/
+.gradle/
+local.properties
+app/schemas/*/1.json
