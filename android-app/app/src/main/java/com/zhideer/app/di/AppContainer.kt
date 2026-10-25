@@ -344,6 +344,9 @@ class AppContainer(
             sessionHistory = { aiSessionStore.load() },
             ioDispatcher = ioDispatcher,
             now = nowMillis,
+            // T32/#33 整库恢复：Room 事务成功后经同一会话存储还原备份中的会话历史；
+            // 恢复路径绝不触碰 aiConfigStore（API Key 安全边界）。
+            sessionRestorer = { sessions -> aiSessionStore.save(sessions) },
         )
     }
 }

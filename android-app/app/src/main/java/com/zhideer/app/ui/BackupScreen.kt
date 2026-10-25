@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -27,8 +28,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.zhideer.app.domain.usecase.BackupInspection
 import com.zhideer.app.domain.usecase.BackupSummary
 import com.zhideer.app.domain.usecase.BackupUseCases
+import com.zhideer.app.domain.usecase.RestoreSummary
 import kotlinx.coroutines.launch
 import java.io.File
 import java.time.Instant
@@ -54,12 +57,18 @@ private val backupTableLabels = mapOf(
 )
 
 /**
- * 备份主界面（T31/#32）：手动导出加密备份。
+ * 备份主界面（T31/#32 导出 + T32/#33 恢复）。
+ * 导出：
  * - 导出前说明备份所含内容与潜在隐私数据（个人事项与对话内容）；
  * - 要求独立备份口令：两次输入一致才可导出，明示忘记口令无法恢复；
  *   口令不会出现在文件名、日志或备份内容中；API Key 与本机配置绝不进入备份；
  * - 导出中禁用按钮；成功展示文件位置、格式版本、数据库版本、导出时间与各表计数摘要；
  * - 失败给出中文提示且不显示成功摘要（失败绝不报告成可用备份）。
+ * 恢复（T32/#33）：核对 → 确认覆盖 → 整库替换：
+ * - 输入备份文件路径与口令，先只读核对（口令、内容、格式、版本兼容）并展示可理解摘要；
+ * - 核对通过后明示恢复将覆盖当前全部数据（不合并）、旧备份可能包含已彻底删除的数据、
+ *   提醒恢复后先暂停、AI 授权需重新确认，并要求对话框二次确认；
+ * - 不兼容/损坏/口令错误绝不覆盖当前数据；恢复完成展示各表计数与暂停提醒清单。
  * MVP 导出位置为应用外部文件目录并展示绝对路径；SAF「另存为」由后续任务补齐。
  * 公开 composable，由 Root 挂导航。
  */
@@ -73,6 +82,17 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
     var exporting by remember { mutableStateOf(false) }
     var summary by remember { mutableStateOf<BackupSummary?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    // —— 恢复区状态（T32/#33） ——
+    var restorePath by remember { mutableStateOf("") }
+    var restorePassword by remember { mutableStateOf("") }
+    var showRestorePassword by remember { mutableStateOf(false) }
+    var inspecting by remember { mutableStateOf(false) }
+    var inspection by remember { mutableStateOf<BackupInspection?>(null) }
+    var restoring by remember { mutableStateOf(false) }
+    var restoreSummary by remember { mutableStateOf<RestoreSummary?>(null) }
+    var restoreError by remember { mutableStateOf<String?>(null) }
+    var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     val mismatch = confirm.isNotEmpty() && password != confirm
     val canExport = !exporting && password.isNotEmpty() && password == confirm
@@ -199,6 +219,221 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                         }
                     }
                 }
+            }
+
+            // ==================== 恢复区（T32/#33）：核对备份并整库替换 ====================
+
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+
+            // —— 恢复前说明：覆盖式替换与后续行为（issue #33 验收） ——
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("从备份恢复", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "恢复会用备份内容整体替换当前全部数据（不与现有数据合并）。" +
+                            "旧备份可能包含您后来已彻底删除的数据，恢复后无法找回当前新数据，" +
+                            "建议先在上方导出一份当前数据的备份。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "恢复后所有提醒将先暂停，需您逐项确认后才会重新启用；" +
+                            "AI 上下文授权需重新确认；API Key 与本机配置不受恢复影响。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = restorePath,
+                onValueChange = { restorePath = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("备份文件路径") },
+                supportingText = { Text("默认备份目录：${exportDirectory.absolutePath}") },
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = restorePassword,
+                onValueChange = { restorePassword = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("备份口令") },
+                supportingText = { Text("输入导出该备份时设置的口令") },
+                singleLine = true,
+                visualTransformation = if (showRestorePassword) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    TextButton(onClick = { showRestorePassword = !showRestorePassword }) {
+                        Text(if (showRestorePassword) "隐藏" else "显示")
+                    }
+                },
+            )
+
+            // —— 第一步：只读核对（口令、内容、格式、版本兼容） ——
+            Button(
+                onClick = {
+                    inspecting = true
+                    restoreError = null
+                    inspection = null
+                    restoreSummary = null
+                    scope.launch {
+                        val result = useCases.inspectBackup(File(restorePath.trim()), restorePassword)
+                        inspecting = false
+                        result
+                            .onSuccess { inspection = it }
+                            .onFailure { e -> restoreError = e.message ?: "备份核对失败：未知错误" }
+                    }
+                },
+                enabled = !inspecting && !restoring && restorePath.isNotBlank() && restorePassword.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (inspecting) "正在核对…" else "核对备份")
+            }
+
+            // —— 核对摘要：导出时间、版本、各表计数 + 兼容性/完整性判定 ——
+            inspection?.let { info ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("备份核对结果", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "导出时间：${Instant.ofEpochMilli(info.exportedAt).atZone(ZoneId.systemDefault()).format(backupTimeFmt)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            "格式版本：${info.formatVersion}　备份库版本：${info.dbVersion}（当前 ${info.currentDbVersion}）",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text("会话：${info.aiSessionCount} 个", style = MaterialTheme.typography.bodySmall)
+                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                        info.tableCounts.forEach { (table, count) ->
+                            Text(
+                                "${backupTableLabels[table] ?: table}：$count 条",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (!info.integrityOk) {
+                            Text(
+                                "备份内容不完整或已损坏（清单与实际内容不一致），请勿使用该文件恢复。",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (!info.compatible) {
+                            Text(
+                                info.incompatibilityReason ?: "备份与当前应用版本不兼容，无法恢复。",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        if (info.integrityOk && info.compatible) {
+                            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                            Text(
+                                "请核对以上摘要：恢复将覆盖当前全部数据（不合并）。确认无误后点击下方按钮。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Button(
+                                onClick = { showRestoreConfirmDialog = true },
+                                enabled = !restoring && !inspecting,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("恢复并覆盖当前数据")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // —— 恢复完成：计数 + 暂停提醒清单 + 后续确认提示 ——
+            restoreSummary?.let { result ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("恢复完成", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "导出时间：${Instant.ofEpochMilli(result.exportedAt).atZone(ZoneId.systemDefault()).format(backupTimeFmt)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            "格式版本：${result.formatVersion}　数据库版本：${result.dbVersion}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text("会话：${result.aiSessionCount} 个（已还原）", style = MaterialTheme.typography.bodySmall)
+                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                        result.tableCounts.forEach { (table, count) ->
+                            Text(
+                                "${backupTableLabels[table] ?: table}：$count 条",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                        Text("已暂停的提醒（先暂停以避免误触发，需您逐项确认后重新启用）：", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "· 待办提醒 ${result.pausedReminderCount} 条" +
+                                if (result.pausedReminderSources.isEmpty()) "" else "：${result.pausedReminderSources.joinToString("、")}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            "· 日程提醒 ${result.pausedCalendarReminderCount} 条" +
+                                if (result.pausedCalendarReminderSources.isEmpty()) "" else "：${result.pausedCalendarReminderSources.joinToString("、")}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            "请在待办与日程中逐项确认启用提醒；AI 上下文授权需重新确认；API Key 与本机配置未受影响。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+
+            // —— 恢复失败反馈：中文提示，不显示成功结果 ——
+            restoreError?.let { message ->
+                Text(
+                    message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+
+            // —— 覆盖前二次确认（issue #33：确认后才替换） ——
+            if (showRestoreConfirmDialog) {
+                AlertDialog(
+                    onDismissRequest = { if (!restoring) showRestoreConfirmDialog = false },
+                    title = { Text("确认整库恢复？") },
+                    text = {
+                        Text(
+                            "将用该备份整体替换当前全部数据，且不与现有数据合并，当前新数据将无法找回。\n\n" +
+                                "· 建议先导出一份当前数据的备份；\n" +
+                                "· 旧备份可能包含您后来已彻底删除的数据；\n" +
+                                "· 恢复后所有提醒先暂停，经您逐项确认后重新启用；\n" +
+                                "· AI 上下文授权需重新确认，API Key 不受影响。",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showRestoreConfirmDialog = false
+                                restoring = true
+                                restoreError = null
+                                restoreSummary = null
+                                scope.launch {
+                                    val result = useCases.restoreAll(File(restorePath.trim()), restorePassword)
+                                    restoring = false
+                                    result
+                                        .onSuccess { restoreSummary = it }
+                                        .onFailure { e -> restoreError = e.message ?: "恢复数据失败：未知错误" }
+                                }
+                            },
+                            enabled = !restoring,
+                        ) {
+                            Text("覆盖并恢复")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRestoreConfirmDialog = false }) {
+                            Text("取消")
+                        }
+                    },
+                )
             }
         }
     }
