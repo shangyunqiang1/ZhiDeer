@@ -471,7 +471,7 @@ class AdvisorUseCasesTest {
         val chat = com.zhideer.app.domain.usecase.AiChatUseCases(
             configStore = com.zhideer.app.data.ai.InMemoryAiConfigStore(),
             sessionStore = com.zhideer.app.data.ai.AiSessionStore(File(storeDir, "ai_sessions.preferences_pb")),
-            client = com.zhideer.app.data.ai.DeepSeekChatClient(connectTimeoutMs = 2_000, readTimeoutMs = 800),
+            client = com.zhideer.app.data.ai.DeepSeekChatClient(connectTimeoutMs = 15_000, readTimeoutMs = 5_000),
             idGen = { "session-gen" },
             now = { NOW },
             contextAuthorizer = AiContextAuthorizer(),

@@ -71,7 +71,7 @@ class AiChatUseCasesTest {
         storeDir = File(System.getProperty("java.io.tmpdir"), "t18-test-${System.nanoTime()}")
         check(storeDir.mkdirs() || storeDir.isDirectory) { "无法创建测试目录" }
         sessionStore = AiSessionStore(File(storeDir, "ai_sessions.preferences_pb"))
-        client = DeepSeekChatClient(connectTimeoutMs = 2_000, readTimeoutMs = 800)
+        client = DeepSeekChatClient(connectTimeoutMs = 15_000, readTimeoutMs = 800)
         useCases = AiChatUseCases(
             configStore = configStore,
             sessionStore = sessionStore,

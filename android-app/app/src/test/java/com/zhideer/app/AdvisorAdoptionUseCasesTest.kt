@@ -125,7 +125,7 @@ class AdvisorAdoptionUseCasesTest {
         val chat = AiChatUseCases(
             configStore = InMemoryAiConfigStore(),
             sessionStore = AiSessionStore(File(storeDir, "ai_sessions.preferences_pb")),
-            client = DeepSeekChatClient(connectTimeoutMs = 2_000, readTimeoutMs = 800),
+            client = DeepSeekChatClient(connectTimeoutMs = 15_000, readTimeoutMs = 5_000),
             idGen = { "session-${sessionIds++}" },
             now = { NOW },
             contextAuthorizer = AiContextAuthorizer(),

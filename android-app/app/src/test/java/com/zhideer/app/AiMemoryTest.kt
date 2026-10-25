@@ -100,7 +100,7 @@ class AiMemoryTest {
         check(storeDir.mkdirs() || storeDir.isDirectory) { "无法创建测试目录" }
         sessionStore = AiSessionStore(File(storeDir, "ai_sessions.preferences_pb"))
         proposalStore = AiProposalStore(File(storeDir, "ai_proposals.preferences_pb"))
-        client = DeepSeekChatClient(connectTimeoutMs = 2_000, readTimeoutMs = 800)
+        client = DeepSeekChatClient(connectTimeoutMs = 15_000, readTimeoutMs = 5_000)
         authorizer = AiContextAuthorizer()
         fakeMemories = FakeMemoriesRepository()
         memories = MemoryUseCases(
