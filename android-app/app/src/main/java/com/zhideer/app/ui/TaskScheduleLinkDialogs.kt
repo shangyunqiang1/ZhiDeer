@@ -310,13 +310,15 @@ fun CompleteTaskFutureSchedulesDialog(
     onDismiss: () -> Unit,
     onKeep: () -> Unit,
     onCancelSchedules: () -> Unit,
+    title: String = "待办已完成，关联日程如何处理？",
+    leadText: String = "「${task.title}」已标记为已完成。它还有 ${futureEntries.size} 个尚未开始的关联日程：",
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("待办已完成，关联日程如何处理？") },
+        title = { Text(title) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("「${task.title}」已标记为已完成。它还有 ${futureEntries.size} 个尚未开始的关联日程：")
+                Text(leadText)
                 futureEntries.forEach { entry ->
                     Text(
                         "· ${entry.title}（${entryRangeLabel(entry)}）",
