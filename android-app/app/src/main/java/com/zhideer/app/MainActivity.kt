@@ -60,6 +60,7 @@ private enum class Secondary(val label: String) {
     SETTINGS("设置"),
     REMINDERS("提醒状态"),
     CLOCK("系统闹钟交接"),
+    DIAGNOSTICS("诊断"),
 }
 
 @Composable
@@ -68,6 +69,8 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
     var secondary by remember { mutableStateOf<Secondary?>(null) }
     var pendingDetailTask by remember { mutableStateOf<com.zhideer.app.domain.model.TodoTask?>(null) }
     var pendingCreating by remember { mutableStateOf(false) }
+    // T35/#36：从诊断页「去配置模型」直达 AI 服务配置对话框
+    var openAiConfig by remember { mutableStateOf(false) }
     // T10/#11：错过提醒合并提示（首页横幅），数据来自系统调度台账的真实错过记录
     val missedReminders by container.reminderRestoreUseCases.observeOutstandingMissed()
         .collectAsState(initial = emptyList())
@@ -87,6 +90,7 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                         appVersion = "0.1.0",
                         onOpenClockHandoff = { secondary = Secondary.CLOCK },
                         onOpenReminderStatus = { secondary = Secondary.REMINDERS },
+                        onOpenDiagnostics = { secondary = Secondary.DIAGNOSTICS },
                     )
                     Secondary.REMINDERS -> com.zhideer.app.ui.ReminderStatusScreen(
                         useCases = container.reminderRestoreUseCases,
@@ -96,6 +100,19 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     Secondary.CLOCK -> com.zhideer.app.ui.ClockHandoffScreen(
                         useCases = container.clockHandoffUseCases,
                         zoneId = container.zoneId,
+                    )
+                    Secondary.DIAGNOSTICS -> com.zhideer.app.ui.DiagnosticsScreen(
+                        useCases = container.diagnosticsUseCases,
+                        fixLauncher = container.reminderFixLauncher,
+                        clockHandoffUseCases = container.clockHandoffUseCases,
+                        exportDirectory = container.diagnosticsExportDirectory,
+                        zoneId = container.zoneId,
+                        appVersion = "0.1.0",
+                        onOpenAiConfig = {
+                            secondary = null
+                            tab = Tab.DEER
+                            openAiConfig = true
+                        },
                     )
                 }
             }
@@ -165,6 +182,9 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     // T23/#24：语音输入（无服务/权限拒绝时中文提示并按键盘回退）与中文播报（默认关闭）
                     voiceInput = container.voiceInputController,
                     voicePlayback = container.voicePlaybackController,
+                    // T35/#36：从诊断页直达 AI 服务配置
+                    openConfigOnStart = openAiConfig,
+                    onOpenConfigConsumed = { openAiConfig = false },
                 )
             }
         }

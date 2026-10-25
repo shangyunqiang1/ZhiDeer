@@ -138,6 +138,9 @@ fun AiScreen(
     // T23/#24 纯新增：语音输入状态机与中文播报开关；UI 只做渲染与事件转发
     voiceInput: VoiceInputController,
     voicePlayback: VoicePlaybackController,
+    // T35/#36 纯新增：从诊断页直达 AI 服务配置（默认行为不变）
+    openConfigOnStart: Boolean = false,
+    onOpenConfigConsumed: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val sessions by useCases.listSessions().collectAsState(initial = emptyList())
@@ -161,6 +164,14 @@ fun AiScreen(
     var createMode by remember { mutableStateOf(false) }
     // #20：正在确认中的提案 id（确认按钮防重）
     var confirmingId by remember { mutableStateOf<String?>(null) }
+
+    // T35/#36：从诊断页进入时直接打开 AI 服务配置对话框（只触发一次）
+    LaunchedEffect(openConfigOnStart) {
+        if (openConfigOnStart) {
+            showConfig = true
+            onOpenConfigConsumed()
+        }
+    }
 
     Scaffold(
         topBar = {

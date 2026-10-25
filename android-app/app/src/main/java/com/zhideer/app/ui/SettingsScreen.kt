@@ -18,6 +18,8 @@ fun SettingsScreen(
     appVersion: String,
     onOpenClockHandoff: () -> Unit = {},
     onOpenReminderStatus: () -> Unit = {},
+    // T35/#36 纯新增：权限与故障诊断二级入口
+    onOpenDiagnostics: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         Text("设置", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(vertical = 8.dp))
@@ -32,6 +34,17 @@ fun SettingsScreen(
         androidx.compose.material3.OutlinedButton(onClick = onOpenClockHandoff, modifier = Modifier.padding(vertical = 4.dp)) {
             Text("系统闹钟交接")
         }
+        androidx.compose.material3.OutlinedButton(
+            onClick = onOpenDiagnostics,
+            modifier = Modifier.padding(vertical = 4.dp),
+        ) {
+            Text("权限与故障诊断")
+        }
+        SettingsCard(
+            "权限与故障诊断",
+            "查看通知与精确提醒权限、模型连接、语音引擎、下次自有提醒与最近失败；" +
+                "未就绪项提供系统设置修复入口与手动回退说明，导出文本已脱敏、不自动发送。",
+        )
         SettingsCard("备份与恢复", "在首页「备份」入口中导出加密备份或整库恢复；备份文件不含 API Key。")
         SettingsCard("数据与隐私", "本地数据存储于设备；记忆删除为彻底删除、不进入回收站；AI 上下文授权为会话级，可随时撤销。")
         SettingsCard("版本", appVersion)

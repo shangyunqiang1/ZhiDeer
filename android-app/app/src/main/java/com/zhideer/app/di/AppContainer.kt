@@ -11,6 +11,7 @@ import com.zhideer.app.data.ai.DeepSeekChatClient
 import com.zhideer.app.data.ai.EncryptedAiConfigStore
 import com.zhideer.app.data.ai.RepositoryAiContextProvider
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.data.diagnostics.DiagnosticsFailureStore
 import com.zhideer.app.data.repository.CalendarRemindersRepositoryImpl
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.ClockHandoffRepositoryImpl
@@ -45,6 +46,7 @@ import com.zhideer.app.domain.usecase.BackupUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.ClockHandoffUseCases
+import com.zhideer.app.domain.usecase.DiagnosticsUseCases
 import com.zhideer.app.domain.usecase.HomeUseCases
 import com.zhideer.app.domain.usecase.MemoryUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
@@ -66,6 +68,7 @@ import com.zhideer.app.platform.AndroidReminderCapabilityProbe
 import com.zhideer.app.platform.AndroidReminderFixLauncher
 import com.zhideer.app.platform.AndroidSpeechInput
 import com.zhideer.app.platform.AndroidSpeechOutput
+import com.zhideer.app.platform.AndroidVoiceEngineProbe
 import com.zhideer.app.platform.NotificationPoster
 import com.zhideer.app.platform.PlatformAlarmScheduler
 import com.zhideer.app.platform.ReminderCapabilityProbe
@@ -74,6 +77,7 @@ import com.zhideer.app.platform.ReminderFixLauncher
 import com.zhideer.app.platform.ScheduleLedgerAlarmScheduler
 import com.zhideer.app.platform.SpeechInput
 import com.zhideer.app.platform.SpeechOutput
+import com.zhideer.app.platform.VoiceEngineProbe
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -539,4 +543,37 @@ class AppContainer(
 
     // 中文播报状态机：默认关闭；可开关、可随时停止；退出页面停止并释放引擎。
     val voicePlaybackController: VoicePlaybackController by lazy { VoicePlaybackController(speechOutput) }
+
+    // —— T35/#36 权限与故障诊断：纯新增装配 ——
+    // 只读能力探针与既有入口：提醒恢复（#11）、交接记录（#25）、模型配置与连接测试（#18）、
+    // 语音识别与中文播报（#24）。诊断只展示可观察事实，不重建新调度路径。
+    // 失败记录与导出诊断文本已在用例层脱敏：不含 API Key、原始录音或完整事项内容，且不自动外发。
+    val voiceEngineProbe: VoiceEngineProbe by lazy { AndroidVoiceEngineProbe(appContext) }
+
+    val diagnosticsFailureStore: DiagnosticsFailureStore by lazy {
+        DiagnosticsFailureStore(File(appContext.filesDir, "diagnostics_failures.preferences_pb"))
+    }
+
+    val diagnosticsExportDirectory: File by lazy {
+        File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "diagnostics")
+            .apply { if (!isDirectory) mkdirs() }
+    }
+
+    val diagnosticsUseCases: DiagnosticsUseCases by lazy {
+        DiagnosticsUseCases(
+            capabilityProbe = reminderCapabilityProbe,
+            // 刷新诊断即走 #11 的同一恢复入口（重建未来调度并返回真实报告），不另建路径
+            refreshReminders = { reminderRestoreUseCases.restore(ReminderRestoreTrigger.MANUAL) },
+            scheduleLog = reminderScheduleLogRepository,
+            clockHandoffRepository = clockHandoffRepository,
+            // 只读掩码视图；连接测试失败由用例层脱敏后写入最近失败
+            loadModelConfig = { aiChatUseCases.loadConfig() },
+            testModelConnection = { aiChatUseCases.testConnection() },
+            voiceProbe = voiceEngineProbe,
+            failureStore = diagnosticsFailureStore,
+            idGen = { UUID.randomUUID().toString() },
+            now = nowMillis,
+            zoneId = zoneId,
+        )
+    }
 }
