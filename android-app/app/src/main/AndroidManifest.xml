@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- T17/#18：AI 对话需要访问 DeepSeek 等服务端点 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:name=".ZhiDeerApplication"
         android:label="知时鹿"

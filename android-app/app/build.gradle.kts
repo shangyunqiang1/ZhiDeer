@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
     id("androidx.room3")
 }
@@ -57,10 +58,18 @@ dependencies {
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
 
+    // T17/#18 AI 对话：DeepSeek（OpenAI 兼容协议）+ 会话历史 DataStore + Key 加密存储
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.security.crypto)
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.okhttp)
+
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.room3.testing)
+    testImplementation(libs.mockwebserver3)
 }

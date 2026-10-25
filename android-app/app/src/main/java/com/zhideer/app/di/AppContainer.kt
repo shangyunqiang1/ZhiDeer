@@ -3,6 +3,10 @@ package com.zhideer.app.di
 import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import com.zhideer.app.data.ai.AiConfigStore
+import com.zhideer.app.data.ai.AiSessionStore
+import com.zhideer.app.data.ai.DeepSeekChatClient
+import com.zhideer.app.data.ai.EncryptedAiConfigStore
 import com.zhideer.app.data.db.ZhiDeerDatabase
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
@@ -10,10 +14,12 @@ import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.TasksRepository
+import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
 import kotlinx.coroutines.Dispatchers
+import java.io.File
 import java.time.ZoneId
 import java.util.UUID
 import kotlin.coroutines.CoroutineContext
@@ -67,4 +73,23 @@ class AppContainer(
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
     )
+
+    // —— AI 对话（T17/#18）：纯新增装配，不改动既有依赖 ——
+    // API Key 存本机加密存储（EncryptedSharedPreferences，主密钥 AndroidKeystore）；
+    // 会话历史存 DataStore（有意避开 Room，见 AiSessionStore 说明）。
+    // 惰性构造：AndroidKeyStore 在 Robolectric 单元测试环境中不可用，
+    // 且这些组件仅在 AI 界面使用，不应在应用启动时强制初始化。
+    val aiConfigStore: AiConfigStore by lazy { EncryptedAiConfigStore(context) }
+
+    val aiChatClient: DeepSeekChatClient by lazy { DeepSeekChatClient() }
+
+    val aiChatUseCases: AiChatUseCases by lazy {
+        AiChatUseCases(
+            configStore = aiConfigStore,
+            sessionStore = AiSessionStore(File(context.filesDir, "ai_chat_sessions.preferences_pb")),
+            client = aiChatClient,
+            idGen = { UUID.randomUUID().toString() },
+            now = nowMillis,
+        )
+    }
 }
