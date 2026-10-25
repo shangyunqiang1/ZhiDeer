@@ -2,9 +2,12 @@ package com.zhideer.app.data.db
 
 import androidx.room3.Entity
 import androidx.room3.PrimaryKey
+import com.zhideer.app.domain.model.RecurrenceFrequency
+import com.zhideer.app.domain.model.RecurrenceRule
 import com.zhideer.app.domain.model.TaskPriority
 import com.zhideer.app.domain.model.TaskStatus
 import com.zhideer.app.domain.model.TodoTask
+import java.time.DayOfWeek
 
 @Entity(tableName = "tasks")
 data class TaskEntity(
@@ -23,6 +26,11 @@ data class TaskEntity(
     val completedAt: Long?,
     val postponedAt: Long?,
     val cancelledAt: Long?,
+    // T12/#13 纯新增：重复规则拆列（可空 = 非重复待办）。
+    // 出现锚点不冗余存储，由 createdAt 在 dueZoneId 下派生。
+    val recurrenceFrequency: String? = null,
+    val recurrenceIntervalDays: Int? = null,
+    val recurrenceWeekdays: String? = null,
 )
 
 fun TaskEntity.toModel() = TodoTask(
@@ -41,6 +49,7 @@ fun TaskEntity.toModel() = TodoTask(
     completedAt = completedAt,
     postponedAt = postponedAt,
     cancelledAt = cancelledAt,
+    recurrenceRule = recurrenceFrequency?.toRecurrenceRule(recurrenceIntervalDays, recurrenceWeekdays),
 )
 
 fun TodoTask.toEntity() = TaskEntity(
@@ -59,4 +68,23 @@ fun TodoTask.toEntity() = TaskEntity(
     completedAt = completedAt,
     postponedAt = postponedAt,
     cancelledAt = cancelledAt,
+    recurrenceFrequency = recurrenceRule?.frequency?.name,
+    recurrenceIntervalDays = recurrenceRule?.takeIf { it.frequency == RecurrenceFrequency.DAILY }?.intervalDays,
+    recurrenceWeekdays = recurrenceRule
+        ?.takeIf { it.frequency == RecurrenceFrequency.WEEKLY }
+        ?.weekdays?.sorted()?.joinToString(",") { it.name },
 )
+
+private fun String.toRecurrenceRule(intervalDays: Int?, weekdaysRaw: String?): RecurrenceRule? = when (this) {
+    RecurrenceFrequency.DAILY.name -> RecurrenceRule(
+        frequency = RecurrenceFrequency.DAILY,
+        intervalDays = intervalDays ?: 1,
+    )
+    RecurrenceFrequency.WEEKLY.name -> RecurrenceRule(
+        frequency = RecurrenceFrequency.WEEKLY,
+        weekdays = weekdaysRaw?.split(",")?.mapNotNull { raw ->
+            DayOfWeek.entries.firstOrNull { it.name == raw }
+        }?.toSet() ?: emptySet(),
+    )
+    else -> null
+}

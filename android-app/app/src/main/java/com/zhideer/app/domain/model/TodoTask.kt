@@ -22,6 +22,10 @@ enum class TaskStatus {
  *
  * [dueZoneId] 在创建时锚定，用于日期截止的“今天/过期”判定，不随设备时区静默变化。
  * 取消（CANCELLED）保留业务记录并停止提醒；普通删除走回收站（[trashedAt]），不永久删除。
+ *
+ * [recurrenceRule]（T12/#13 纯新增，可空）：重复规则。重复待办按固定日期规则反复出现，
+ * 每一次出现的完成状态以 (taskId, 出现日) 维度分别记录（见 [TaskOccurrence]），
+ * 本体 status 不代表某一次出现的完成。
  */
 data class TodoTask(
     val id: String,
@@ -39,4 +43,5 @@ data class TodoTask(
     val completedAt: Long? = null,
     val postponedAt: Long? = null,
     val cancelledAt: Long? = null,
+    val recurrenceRule: RecurrenceRule? = null,
 )
