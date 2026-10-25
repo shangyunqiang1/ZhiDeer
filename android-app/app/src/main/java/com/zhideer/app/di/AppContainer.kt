@@ -12,6 +12,7 @@ import com.zhideer.app.data.db.ZhiDeerDatabase
 import com.zhideer.app.data.repository.CalendarRemindersRepositoryImpl
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
+import com.zhideer.app.data.repository.OccurrenceSubTaskRecordsRepositoryImpl
 import com.zhideer.app.data.repository.RemindersRepositoryImpl
 import com.zhideer.app.data.repository.SubTasksRepositoryImpl
 import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
@@ -19,6 +20,7 @@ import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
+import com.zhideer.app.domain.repository.OccurrenceSubTaskRecordsRepository
 import com.zhideer.app.domain.repository.RemindersRepository
 import com.zhideer.app.domain.repository.SubTasksRepository
 import com.zhideer.app.domain.repository.TaskOccurrenceRepository
@@ -29,6 +31,7 @@ import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
+import com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases
 import com.zhideer.app.domain.usecase.RecurrenceUseCases
 import com.zhideer.app.domain.usecase.ReminderUseCases
 import com.zhideer.app.domain.usecase.SubTaskUseCases
@@ -134,6 +137,19 @@ class AppContainer(
         },
         // #13：重复待办的列表过滤与完成走出现维度（每一次分别记录完成）
         occurrenceRepository = taskOccurrenceRepository,
+    )
+
+    // T15/#16 纯新增：出现维度子任务步骤记录仓库与用例——重复待办的每一次出现
+    // 按父待办子任务模板分别执行步骤，勾选状态按出现独立记录（occurrence_subtask_records）。
+    val occurrenceSubTaskRecordsRepository: OccurrenceSubTaskRecordsRepository =
+        OccurrenceSubTaskRecordsRepositoryImpl(database.occurrenceSubTaskRecordDao(), Dispatchers.IO)
+
+    val occurrenceSubTaskUseCases: OccurrenceSubTaskUseCases = OccurrenceSubTaskUseCases(
+        tasksRepository = tasksRepository,
+        occurrenceRepository = taskOccurrenceRepository,
+        recordsRepository = occurrenceSubTaskRecordsRepository,
+        subTasksRepository = subTasksRepository,
+        now = nowMillis,
     )
 
     val calendarRepository: CalendarRepository = CalendarRepositoryImpl(database.calendarEntryDao(), Dispatchers.IO)
