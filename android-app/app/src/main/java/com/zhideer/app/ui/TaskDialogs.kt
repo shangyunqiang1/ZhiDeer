@@ -13,6 +13,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -231,6 +232,7 @@ fun TaskDetailDialog(
     calendarUseCases: com.zhideer.app.domain.usecase.CalendarUseCases,
     reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
     recurrenceUseCases: com.zhideer.app.domain.usecase.RecurrenceUseCases,
+    occurrenceSubTaskUseCases: com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases,
     onDismiss: () -> Unit,
     onEdit: () -> Unit,
     onPostponeTomorrow: () -> Unit,
@@ -270,6 +272,30 @@ fun TaskDetailDialog(
                     zoneId = zoneId,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                if (task.recurrenceRule != null) {
+                    val occurrences by remember(task.id) {
+                        recurrenceUseCases.observeOccurrences(task.id)
+                    }.collectAsState(initial = emptyList())
+                    val todayDay = LocalDate.now(zoneId).toEpochDay()
+                    val nextDay = com.zhideer.app.domain.usecase.RecurrenceUseCases.nextUnfinishedDay(
+                        task,
+                        occurrences,
+                        todayDay,
+                    )
+                    val row = occurrences.firstOrNull {
+                        it.effectiveEpochDay == nextDay && !it.completed
+                    }
+                    if (nextDay != null) {
+                        com.zhideer.app.ui.OccurrenceStepsPanel(
+                            useCases = occurrenceSubTaskUseCases,
+                            taskId = task.id,
+                            occurrenceEpochDay = row?.effectiveEpochDay ?: nextDay,
+                            zoneId = zoneId,
+                            originalEpochDay = row?.originalEpochDay ?: nextDay,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
                 com.zhideer.app.ui.RemindersPanel(
                     useCases = reminderUseCases,
                     taskId = task.id,
