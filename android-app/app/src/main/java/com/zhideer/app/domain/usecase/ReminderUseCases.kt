@@ -2,6 +2,8 @@ package com.zhideer.app.domain.usecase
 
 import com.zhideer.app.domain.model.Reminder
 import com.zhideer.app.domain.model.ReminderDisplay
+import com.zhideer.app.domain.model.ReminderRestoreOutcome
+import com.zhideer.app.domain.model.TaskStatus
 import com.zhideer.app.domain.model.TodoTask
 import com.zhideer.app.domain.model.resolvedAt
 import com.zhideer.app.domain.repository.RemindersRepository
@@ -125,6 +127,48 @@ class ReminderUseCases(
         repository.listByTask(taskId).forEach { scheduler.cancel(it.id) }
         repository.deleteByTask(taskId)
         return Result.success(Unit)
+    }
+
+    /**
+     * 设备变化后的整体恢复（T10/#11）：按真实本地提醒记录逐条重算并重建调度，
+     * 与设置提醒时走同一套 [applySchedule] 规则（不另建路径）。
+     *
+     * - 待办已删除/取消/完成或提醒已停用：取消系统闹钟并跳过，不复活提醒；
+     * - [suppressedInstants] 为终态调度键（"键@时刻"，已投递或已错过）：不得再次调度，
+     *   即便系统时间倒拨也不补响；
+     * - 其余未到点提醒按当前权限重新提交调度，已过点提醒不再提交（错过由台账统一提示）。
+     * 幂等：同一提醒按同一调度键覆盖，不产生重复闹钟或重复记录。
+     */
+    suspend fun restoreAll(suppressedInstants: Set<String> = emptySet()): ReminderRestoreOutcome {
+        var scanned = 0
+        var rescheduled = 0
+        var notReady = 0
+        var skipped = 0
+        repository.listAll().forEach { reminder ->
+            scanned++
+            val task = tasksRepository.getTask(reminder.taskId)
+            val resolved = reminder.resolvedAt(task)
+            val suppressed = resolved != null && "${reminder.id}@$resolved" in suppressedInstants
+            if (task == null || task.trashedAt != null || task.status != TaskStatus.ACTIVE || suppressed) {
+                scheduler.cancel(reminder.id)
+                skipped++
+                return@forEach
+            }
+            applySchedule(reminder, task)
+            val after = repository.get(reminder.id)
+            when {
+                after == null -> skipped++
+                after.notReadyReason != null -> notReady++
+                after.enabled && resolved != null && resolved > now() -> rescheduled++
+                else -> skipped++
+            }
+        }
+        return ReminderRestoreOutcome(
+            scannedCount = scanned,
+            rescheduledCount = rescheduled,
+            notReadyCount = notReady,
+            skippedCount = skipped,
+        )
     }
 
     /** 修复入口：按当前能力重新评估该待办全部提醒，可调度则清除未就绪标记并恢复闹钟。幂等。 */

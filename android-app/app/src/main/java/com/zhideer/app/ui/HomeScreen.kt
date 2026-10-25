@@ -59,6 +59,8 @@ fun HomeScreen(
     onOpenBackup: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenTaskDetail: (TodoTask) -> Unit,
+    missedReminderCount: Int = 0,
+    onOpenReminders: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val snapshot by homeUseCases.observeHome().collectAsState(
@@ -74,6 +76,21 @@ fun HomeScreen(
                 StatCard("今天到期", snapshot.stats.dueTodayCount, Modifier.weight(1f))
                 StatCard("已过期", snapshot.stats.overdueCount, Modifier.weight(1f))
                 StatCard("今日完成", snapshot.stats.completedTodayCount, Modifier.weight(1f))
+            }
+        }
+        if (missedReminderCount > 0) {
+            item {
+                // T10/#11：错过提醒合并提示（不逐条弹通知、不补响）
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Column(Modifier.padding(10.dp)) {
+                        Text("有 $missedReminderCount 条提醒在设备变化期间错过", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "已合并记录，不会逐条补响，也不会自动延期或完成事项。",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = onOpenReminders) { Text("查看错过提醒与设备状态") }
+                    }
+                }
             }
         }
         item {

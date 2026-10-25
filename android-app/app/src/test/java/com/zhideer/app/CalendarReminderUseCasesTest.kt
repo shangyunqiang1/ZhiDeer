@@ -516,7 +516,7 @@ private class CalendarFakeAlarmScheduler : AlarmScheduler {
 
     override fun canScheduleExact(): Boolean = exactAllowed
 
-    override fun scheduleExact(
+    override suspend fun scheduleExact(
         reminderId: String,
         triggerAtMillis: Long,
         taskId: String,
@@ -526,7 +526,7 @@ private class CalendarFakeAlarmScheduler : AlarmScheduler {
         return scheduleResult
     }
 
-    override fun scheduleInexact(
+    override suspend fun scheduleInexact(
         reminderId: String,
         triggerAtMillis: Long,
         taskId: String,
@@ -536,7 +536,7 @@ private class CalendarFakeAlarmScheduler : AlarmScheduler {
         return scheduleResult
     }
 
-    override fun cancel(reminderId: String) {
+    override suspend fun cancel(reminderId: String) {
         cancelled += reminderId
     }
 

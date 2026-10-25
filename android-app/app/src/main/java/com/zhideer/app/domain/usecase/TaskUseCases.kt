@@ -92,6 +92,8 @@ class TaskUseCases(
             category = input.category.trim(),
             dueEpochDay = input.dueEpochDay,
             dueAtMillis = input.dueAtMillis,
+            // T10/#11：编辑或时区确认必须保存新的锚定时区（否则时区确认等于没保存）
+            dueZoneId = input.dueZoneId,
             recurrenceRule = input.recurrenceRule,
             updatedAt = now(),
         )

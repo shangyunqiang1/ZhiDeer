@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.Flow
 interface RemindersRepository {
     fun observeByTask(taskId: String): Flow<List<Reminder>>
     suspend fun listByTask(taskId: String): List<Reminder>
+
+    /** 设备变化恢复（T10/#11）：全部待办提醒，按真实本地记录重建调度。 */
+    suspend fun listAll(): List<Reminder>
     suspend fun get(id: String): Reminder?
     suspend fun upsert(reminder: Reminder)
     suspend fun delete(id: String)

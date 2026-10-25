@@ -3,8 +3,12 @@
 
     <!-- T17/#18：AI 对话需要访问 DeepSeek 等服务端点 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- T23/#24：按住说话需要麦克风；拒绝时中文提示并回退键盘，录音只交给系统识别服务、不落盘 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- T10/#11：设备重启后恢复提醒调度 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- T24/#25：ColorOS 15 实测缺此声明时 SET_ALARM 抛 SecurityException -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
@@ -43,5 +47,18 @@
         <receiver
             android:name=".platform.ReminderAlarmReceiver"
             android:exported="false" />
+
+        <!-- T10/#11：设备重启、系统时间/时区变化、精确提醒权限变化后恢复提醒。
+             恢复幂等：重复广播不产生重复闹钟；只按真实本地记录重建。 -->
+        <receiver
+            android:name=".platform.ReminderRestoreReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

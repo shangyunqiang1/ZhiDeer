@@ -4,6 +4,7 @@ import com.zhideer.app.domain.model.CalendarEntry
 import com.zhideer.app.domain.model.Reminder
 import com.zhideer.app.domain.model.ReminderDisplay
 import com.zhideer.app.domain.model.ReminderOwner
+import com.zhideer.app.domain.model.ReminderRestoreOutcome
 import com.zhideer.app.domain.model.resolvedAtForEntry
 import com.zhideer.app.domain.model.schedulerKey
 import com.zhideer.app.domain.repository.CalendarRemindersRepository
@@ -126,6 +127,44 @@ class CalendarReminderUseCases(
         repository.listByEntry(entryId).forEach { scheduler.cancel(it.schedulerKey()) }
         repository.deleteByEntry(entryId)
         return Result.success(Unit)
+    }
+
+    /**
+     * 设备变化后的整体恢复（T10/#11）：与待办提醒恢复同一套 [applySchedule] 规则，
+     * 调度键使用 [schedulerKey]（日程提醒带 "cal:" 前缀）区分归属。
+     * 日程已删除/提醒已停用或为终态调度（已投递/已错过）时取消并跳过，不补响。
+     */
+    suspend fun restoreAll(suppressedInstants: Set<String> = emptySet()): ReminderRestoreOutcome {
+        var scanned = 0
+        var rescheduled = 0
+        var notReady = 0
+        var skipped = 0
+        repository.listAll().forEach { reminder ->
+            scanned++
+            val key = reminder.schedulerKey()
+            val entry = calendarRepository.getEntry(reminder.taskId)
+            val resolved = reminder.resolvedAtForEntry(entry)
+            val suppressed = resolved != null && "$key@$resolved" in suppressedInstants
+            if (entry == null || entry.trashedAt != null || suppressed) {
+                scheduler.cancel(key)
+                skipped++
+                return@forEach
+            }
+            applySchedule(reminder, entry)
+            val after = repository.get(reminder.id)
+            when {
+                after == null -> skipped++
+                after.notReadyReason != null -> notReady++
+                after.enabled && resolved != null && resolved > now() -> rescheduled++
+                else -> skipped++
+            }
+        }
+        return ReminderRestoreOutcome(
+            scannedCount = scanned,
+            rescheduledCount = rescheduled,
+            notReadyCount = notReady,
+            skippedCount = skipped,
+        )
     }
 
     /** 修复入口：按当前能力重新评估该日程全部提醒，可调度则清除未就绪标记并恢复闹钟。幂等。 */
