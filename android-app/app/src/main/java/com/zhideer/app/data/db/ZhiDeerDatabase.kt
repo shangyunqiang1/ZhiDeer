@@ -4,7 +4,9 @@ import androidx.room3.Database
 import androidx.room3.RoomDatabase
 
 /**
- * version 13：合并 T27/#28（memories 纯新增来源引用拆列 sourceRefType/sourceRefId/
+ * version 14：T24/#25 新增 clock_handoffs 系统闹钟交接记录表（只记录本应用发起的
+ * 待核对请求，无法读取系统闹钟内容）。
+ * 历史：version 13：合并 T27/#28（memories 纯新增来源引用拆列 sourceRefType/sourceRefId/
  * sourceRefMissing——记忆依据的原始记录引用，来源删除边界联动按来源级联标记与清理）。
  * 历史：version 12：合并 T26/#27（memories 长期记忆表——用户显式保存并确认的偏好或事实，
  * 独立隐私数据表，无回收站列，删除即物理删除）。历史：
@@ -35,8 +37,9 @@ import androidx.room3.RoomDatabase
         CalendarReminderEntity::class,
         OccurrenceSubTaskRecordEntity::class,
         MemoryEntity::class,
+        ClockHandoffEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = true,
 )
 abstract class ZhiDeerDatabase : RoomDatabase() {
@@ -49,6 +52,7 @@ abstract class ZhiDeerDatabase : RoomDatabase() {
     abstract fun calendarReminderDao(): CalendarReminderDao
     abstract fun occurrenceSubTaskRecordDao(): OccurrenceSubTaskRecordDao
     abstract fun memoryDao(): MemoryDao
+    abstract fun clockHandoffDao(): ClockHandoffDao
 
     companion object {
         const val NAME = "zhideer.db"

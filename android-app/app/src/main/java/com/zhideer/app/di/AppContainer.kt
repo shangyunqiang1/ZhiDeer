@@ -12,6 +12,7 @@ import com.zhideer.app.data.ai.RepositoryAiContextProvider
 import com.zhideer.app.data.db.ZhiDeerDatabase
 import com.zhideer.app.data.repository.CalendarRemindersRepositoryImpl
 import com.zhideer.app.data.repository.CalendarRepositoryImpl
+import com.zhideer.app.data.repository.ClockHandoffRepositoryImpl
 import com.zhideer.app.data.repository.MemoriesRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.OccurrenceSubTaskRecordsRepositoryImpl
@@ -21,6 +22,7 @@ import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
+import com.zhideer.app.domain.repository.ClockHandoffRepository
 import com.zhideer.app.domain.model.MemoryRefType
 import com.zhideer.app.domain.repository.MemoriesRepository
 import com.zhideer.app.domain.repository.NotesRepository
@@ -38,6 +40,7 @@ import com.zhideer.app.domain.usecase.AdvisorUseCases
 import com.zhideer.app.domain.usecase.BackupUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
+import com.zhideer.app.domain.usecase.ClockHandoffUseCases
 import com.zhideer.app.domain.usecase.HomeUseCases
 import com.zhideer.app.domain.usecase.MemoryUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
@@ -50,6 +53,7 @@ import com.zhideer.app.domain.usecase.SubTaskUseCases
 import com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
 import com.zhideer.app.platform.AlarmScheduler
+import com.zhideer.app.platform.AndroidClockLauncher
 import com.zhideer.app.platform.AndroidNotificationPoster
 import com.zhideer.app.platform.NotificationPoster
 import com.zhideer.app.platform.PlatformAlarmScheduler
@@ -71,6 +75,9 @@ class AppContainer(
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     val zoneId: ZoneId = zoneId
+
+    /** 平台适配器需要的应用上下文（T24/#25）。 */
+    val appContext: Context = context
 
     val database: ZhiDeerDatabase = Room.databaseBuilder<ZhiDeerDatabase>(
         context = context,
@@ -363,6 +370,18 @@ class AppContainer(
     // 采纳 = suggestionToProposal 落 PENDING 操作提案（sessionId = null），
     // 此后完全复用既有提案状态机（aiProposalUseCases.confirmProposal 确认执行）。
     // 生成与查看建议绝不写业务仓库；记忆类建议仅在 MEMORY 类别授权后读取活动记忆。
+    val clockHandoffRepository: ClockHandoffRepository =
+        ClockHandoffRepositoryImpl(database.clockHandoffDao(), Dispatchers.IO)
+
+    val clockLauncher: com.zhideer.app.platform.ClockLauncher by lazy { AndroidClockLauncher(appContext) }
+
+    val clockHandoffUseCases: ClockHandoffUseCases = ClockHandoffUseCases(
+        repository = clockHandoffRepository,
+        launcher = clockLauncher,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
+    )
+
     val homeUseCases: HomeUseCases by lazy {
         HomeUseCases(taskUseCases, calendarUseCases, zoneId, nowMillis)
     }

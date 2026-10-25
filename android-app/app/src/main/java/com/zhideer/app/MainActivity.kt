@@ -46,7 +46,7 @@ class MainActivity : ComponentActivity() {
 private enum class Tab(val label: String) { HOME("首页"), CALENDAR("日历"), NOTES("便签"), TASKS("待办"), DEER("小鹿") }
 
 /** 二级入口（从首页进入，返回回首页）：记忆、回收站、备份、设置。 */
-private enum class Secondary(val label: String) { MEMORY("记忆"), BIN("回收站"), BACKUP("备份"), SETTINGS("设置") }
+private enum class Secondary(val label: String) { MEMORY("记忆"), BIN("回收站"), BACKUP("备份"), SETTINGS("设置"), CLOCK("系统闹钟交接") }
 
 @Composable
 private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
@@ -66,7 +66,14 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                         useCases = container.backupUseCases,
                         exportDirectory = container.backupExportDirectory,
                     )
-                    Secondary.SETTINGS -> com.zhideer.app.ui.SettingsScreen(appVersion = "0.1.0")
+                    Secondary.SETTINGS -> com.zhideer.app.ui.SettingsScreen(
+                        appVersion = "0.1.0",
+                        onOpenClockHandoff = { secondary = Secondary.CLOCK },
+                    )
+                    Secondary.CLOCK -> com.zhideer.app.ui.ClockHandoffScreen(
+                        useCases = container.clockHandoffUseCases,
+                        zoneId = container.zoneId,
+                    )
                 }
             }
         }

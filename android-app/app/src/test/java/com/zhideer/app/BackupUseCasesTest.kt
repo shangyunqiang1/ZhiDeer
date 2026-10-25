@@ -251,14 +251,14 @@ class BackupUseCasesTest {
 
         val summary = useCases.exportAll(password, target).getOrThrow()
         assertEquals(clock.last(), summary.exportedAt)
-        // T27/#28 数据库升至 v13（memories 来源引用拆列），备份记录的版本随之演进
-        assertEquals(13, summary.dbVersion)
+        // 数据库版本随 schema 演进（当前 v14，动态读取避免每次升版改测试）
+        assertEquals(currentDbVersion(), summary.dbVersion)
 
         // 校验入口：版本信息与清单计数核对
         val verification = useCases.verify(target, password).getOrThrow()
         assertTrue("清单计数应与实际行数一致", verification.integrityOk)
         assertEquals(BackupUseCases.FORMAT_VERSION, verification.formatVersion)
-        assertEquals(13, verification.dbVersion)
+        assertEquals(currentDbVersion(), verification.dbVersion)
         assertEquals(1, verification.aiSessionCount)
 
         // 内容核对：各表行数、字段原文、会话历史

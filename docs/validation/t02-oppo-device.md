@@ -125,3 +125,32 @@
 完整组件查询证据仅留在仓库外 `reno10-handler-evidence.json`。识别查询未发现标准服务，是后续缺少引擎回退测试的线索，不扩大为设备不存在任何语音产品的结论。TTS handler 存在而默认设置为 null，仍须通过应用实际初始化、中文语言检查和播报验证；系统时钟 handler 存在也不证明交接或保存已成功。shell 查询不能替代应用 UID 下的能力检查与 manifest 可见性配置验证。
 
 本轮未启动任何闹钟、录音或播报，未安装应用、修改权限、重启手机或读取私人记录；不含设备唯一标识。尚无可运行 probe APK，通知、准时提醒、重启恢复、省电、麦克风回退、中文播报和系统闹钟实际交接均继续未验证，不能关闭 #3。
+
+## 2026-10-25 实机验收（OPPO PHW110）实际结果
+
+**设备与时间**：OPPO PHW110、Android 15（API 35）、安全补丁 2026-09-01、ColorOS V15.0.0、Asia/Shanghai；adb 序列号已脱敏不记录。安装对象：探针 `com.zhideer.probe`（合成数据）与产品 `com.zhideer.app`（v0.1.0, versionCode 1）。证据目录仓库外 `G:/ZhiDeer-tools/evidence/device/`。
+
+### 已实证项
+
+| 编号 | 结果 | 证据 |
+|---|---|---|
+| D01 通知（允许路径） | **通过**：通知真实显示于系统横幅与通知中心；渠道 `probe_exact` importance=4（HIGH）、`mVibrationEnabled=true`、提示音为系统默认 | `d01-delivered.png`；`dumpsys notification --noredact`：`AppSettings: com.zhideer.probe importance=DEFAULT userSet=true`、`android.title=探针：手动触发的立即通知`、`mShowBanner=true` |
+| D01 通知（拒绝路径） | **通过**：应用级通知开关关闭时 `POST_NOTIFICATION: ignore`、`importance=NONE`，通知不可见；探针保持调用成功但界面与日志如实记录，不伪装成功 | 早期截图与 `dumpsys package ... POST_NOTIFICATIONS: granted=false` |
+| D02 精确提醒（能力不足路径） | **通过**：`canScheduleExactAlarms=false` 时探针不降级，先跳转 `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` 系统页并提供入口 | 系统「闹钟和提醒 → 允许设置闹钟和提醒」页截图 |
+| D02 精确提醒（允许后准时性） | **通过**：用户授权后 `AlarmManager` 实际注册 `type=RTC_WAKEUP exactAllowReason=policy_permission`；锁屏期间通知投递（`notification_visibility` 事件 + NotificationRecord） | `dumpsys alarm`、`logcat -b events`、`d02-*` 证据 |
+| D07 语音识别 | **通过（能力缺失结论）**：应用 UID 下 `SpeechRecognizer.isRecognitionAvailable=false`，`queryIntentServices(RecognitionService)` 返回空 → 中文说明 + 键盘回退为必需路径；不得静默外发或持久保存录音 | 探针 logcat `RecognitionService 组件: 无` |
+| D08 中文播报 | **通过**：`TextToSpeech` 初始化成功（引擎 `com.yuemeng.speechsuite`），`isLanguageAvailable(zh_CN)=AVAILABLE`，`speak()` 返回 0，**用户人工确认听到中文播报** | logcat + 用户确认（本机非默认引擎设置，仍可播报） |
+| D09 系统时钟交接 | **通过并发现硬约束**：① 缺失 `com.android.alarm.permission.SET_ALARM` 声明时系统抛 `SecurityException: requires com.android.alarm.permission.SET_ALARM`（探针首版即如此）；② 具备权限时 ColorOS 15 的 `HandleApiActivity`/`AlarmClockCTS` 接收 `SET_ALARM` 但**只打开闹钟列表、不预填编辑器**，extras 未被采用；③ `SHOW_ALARMS` 有处理器。结论：交接记录必须保持「待核对」，不得声称已保存；不得承诺平台未验证的预填能力 | logcat SecurityException、`d09-clock-opened.png`（列表无预填项）、handler 查询 |
+
+### 未完成项与原因（如实记录）
+
+- **D03 重启恢复**：需真实重启设备并解锁；本轮未执行（避免中断用户正在使用的手机），未验证。
+- **D04 休眠/省电**：需在默认/省电/厂商后台限制三种条件下各等待一段时间；未执行，未验证。
+- **D05 时间变化**：需人工改系统时区与时间；未执行，未验证。
+- **D06 麦克风拒绝与录音生命周期**：产品尚未实现语音输入（#23/#24 未交付），无法在应用层验证录音生命周期；已由 D07 固定"无识别服务"这一环境事实。
+- **D10 指定日期交接与失败回退**：由 D09 结论推导为"不承诺预填、保持待核对"，无支持 handler 的独立环境未构造，未验证。
+- **产品级提醒真实投递（#9/#10）**：产品 `com.zhideer.app` 的通知总开关在本轮结束时仍为 `ignore`，产品内创建提醒并在锁屏等待的端到端投递**尚未验证**；平台侧路径（精确闹钟注册 + 锁屏通知投递）已由探针实证。
+
+### 结论
+
+#3 的验收标准要求"通知、显式准时提醒、重启恢复及省电限制下的可观察结果"与"系统语音识别、中文 TTS、麦克风拒绝及缺少引擎的回落能力"逐项核对。本轮已实证通知投递、精确提醒准时性与不当降级、中文 TTS、识别服务缺失、系统时钟交接的真实边界；**重启恢复、省电限制、时间变化、麦克风拒绝与产品级提醒投递仍未验证**，因此 #3 不宣称全部通过。
