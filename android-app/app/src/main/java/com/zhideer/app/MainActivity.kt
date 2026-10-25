@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tab(val label: String) { TASKS("待办"), CALENDAR("日程"), NOTES("便签") }
+private enum class Tab(val label: String) { TASKS("待办"), CALENDAR("日程"), NOTES("便签"), AI("AI") }
 
 @Composable
 private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
@@ -70,6 +70,7 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                 )
                 Tab.CALENDAR -> CalendarScreen(useCases = container.calendarUseCases, deviceZone = ZoneId.systemDefault())
                 Tab.NOTES -> NotesScreen(useCases = container.noteUseCases)
+                Tab.AI -> com.zhideer.app.ui.AiScreen(useCases = container.aiChatUseCases)
             }
         }
     }
