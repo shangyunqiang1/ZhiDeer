@@ -197,17 +197,22 @@ private enum class DueKind { NONE, DATE, TIME }
 fun TaskDetailDialog(
     task: TodoTask,
     zoneId: ZoneId,
+    subTaskUseCases: com.zhideer.app.domain.usecase.SubTaskUseCases,
+    linkUseCases: com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases,
+    calendarUseCases: com.zhideer.app.domain.usecase.CalendarUseCases,
+    reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
     onDismiss: () -> Unit,
     onEdit: () -> Unit,
     onPostponeTomorrow: () -> Unit,
     onCancelTask: () -> Unit,
     onTrash: () -> Unit,
 ) {
+    var showLinkDialog by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(task.title) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("优先级：${task.priority.label}")
                 if (task.category.isNotBlank()) Text("分类：${task.category}")
                 if (task.note.isNotBlank()) Text("备注：${task.note}")
@@ -222,11 +227,25 @@ fun TaskDetailDialog(
                 task.postponedAt?.let { Text("延期于：${formatMillis(it, zoneId)}") }
                 task.completedAt?.let { Text("完成于：${formatMillis(it, zoneId)}") }
                 task.cancelledAt?.let { Text("取消于：${formatMillis(it, zoneId)}") }
+                SubTasksPanel(
+                    useCases = subTaskUseCases,
+                    parentId = task.id,
+                    zoneId = zoneId,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                com.zhideer.app.ui.RemindersPanel(
+                    useCases = reminderUseCases,
+                    taskId = task.id,
+                    zoneId = zoneId,
+                    dueAtMillis = task.dueAtMillis,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         },
         confirmButton = {
             Row {
                 TextButton(onClick = onEdit) { Text("编辑") }
+                TextButton(onClick = { showLinkDialog = true }) { Text("关联日程") }
                 TextButton(onClick = onPostponeTomorrow) { Text("延期到明天") }
                 TextButton(onClick = onCancelTask) { Text("取消待办") }
                 TextButton(onClick = onTrash) { Text("删除") }
@@ -236,6 +255,16 @@ fun TaskDetailDialog(
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
+    if (showLinkDialog) {
+        TaskScheduleLinkDialog(
+            task = task,
+            linkUseCases = linkUseCases,
+            calendarUseCases = calendarUseCases,
+            zoneId = zoneId,
+            onDismiss = { showLinkDialog = false },
+            onOpenEntry = { showLinkDialog = false },
+        )
+    }
 }
 
 private fun statusLabel(task: TodoTask): String = when (task.status) {

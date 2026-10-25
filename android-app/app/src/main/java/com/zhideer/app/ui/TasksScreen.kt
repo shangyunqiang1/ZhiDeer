@@ -35,7 +35,10 @@ import com.zhideer.app.domain.model.TaskFilter
 import com.zhideer.app.domain.model.TaskPriority
 import com.zhideer.app.domain.model.TaskStatus
 import com.zhideer.app.domain.model.TodoTask
+import com.zhideer.app.domain.usecase.CalendarUseCases
+import com.zhideer.app.domain.usecase.SubTaskUseCases
 import com.zhideer.app.domain.usecase.TaskInput
+import com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -49,13 +52,22 @@ private val timeFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 /** 待办列表主界面：过滤、列表、新建/编辑、详情操作（完成/延期/取消/删除）。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TasksScreen(useCases: TaskUseCases, zoneId: ZoneId) {
+fun TasksScreen(
+    useCases: TaskUseCases,
+    zoneId: ZoneId,
+    subTaskUseCases: SubTaskUseCases,
+    linkUseCases: TaskScheduleLinkUseCases,
+    calendarUseCases: CalendarUseCases,
+    reminderUseCases: com.zhideer.app.domain.usecase.ReminderUseCases,
+) {
     val scope = rememberCoroutineScope()
     var filter by remember { mutableStateOf(TaskFilter.TODAY) }
     var editing by remember { mutableStateOf<TodoTask?>(null) }
     var creating by remember { mutableStateOf(false) }
     var viewing by remember { mutableStateOf<TodoTask?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var completeCandidate by remember { mutableStateOf<TodoTask?>(null) }
+    var candidateFuture by remember { mutableStateOf(emptyList<com.zhideer.app.domain.model.CalendarEntry>()) }
 
     val tasks by remember(filter) {
         useCases.observe(filter)
@@ -101,8 +113,19 @@ fun TasksScreen(useCases: TaskUseCases, zoneId: ZoneId) {
                         nowMillis = System.currentTimeMillis(),
                         onToggle = { completed ->
                             scope.launch {
-                                useCases.complete(task.id, completed)
-                                    .onFailure { error = it.message }
+                                if (completed) {
+                                    val future = linkUseCases.futureEntriesForTask(task.id)
+                                    if (future.isNotEmpty()) {
+                                        completeCandidate = task
+                                        candidateFuture = future
+                                    } else {
+                                        useCases.complete(task.id, true)
+                                            .onFailure { error = it.message }
+                                    }
+                                } else {
+                                    useCases.complete(task.id, false)
+                                        .onFailure { error = it.message }
+                                }
                             }
                         },
                         onClick = { viewing = task },
@@ -145,6 +168,10 @@ fun TasksScreen(useCases: TaskUseCases, zoneId: ZoneId) {
         TaskDetailDialog(
             task = task,
             zoneId = zoneId,
+            subTaskUseCases = subTaskUseCases,
+            linkUseCases = linkUseCases,
+            calendarUseCases = calendarUseCases,
+            reminderUseCases = reminderUseCases,
             onDismiss = { viewing = null },
             onEdit = { viewing = null; editing = task },
             onPostponeTomorrow = {
@@ -166,6 +193,27 @@ fun TasksScreen(useCases: TaskUseCases, zoneId: ZoneId) {
                 scope.launch {
                     useCases.trash(task.id).onSuccess { viewing = null; error = null }
                         .onFailure { error = it.message }
+                }
+            },
+        )
+    }
+
+    completeCandidate?.let { candidate ->
+        CompleteTaskFutureSchedulesDialog(
+            task = candidate,
+            futureEntries = candidateFuture,
+            onDismiss = { completeCandidate = null },
+            onKeep = {
+                scope.launch {
+                    useCases.complete(candidate.id, true).onFailure { error = it.message }
+                    completeCandidate = null
+                }
+            },
+            onCancelSchedules = {
+                scope.launch {
+                    useCases.complete(candidate.id, true).onFailure { error = it.message }
+                    linkUseCases.cancelFutureEntries(candidate.id)
+                    completeCandidate = null
                 }
             },
         )

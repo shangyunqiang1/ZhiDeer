@@ -23,12 +23,24 @@ data class TaskInput(
 /**
  * 统一待办用例入口：创建、编辑、完成、延期、取消、回收站删除与过滤查询。
  * 完成、延期、取消分别记录时间戳；取消与删除（回收站）是不同的业务动作。
+ * 完成/延期/取消均不触碰子任务（T07/#8：父子分别确认完成，互不联动）。
  */
 class TaskUseCases(
     private val repository: TasksRepository,
     private val idGen: () -> String,
     private val now: () -> Long,
     private val zoneId: String,
+    // T07/#8 纯新增：待办进入回收站时的子任务联动钩子，默认无操作；
+    // AppContainer 组装后注册为 SubTaskUseCases::trashForParent，
+    // 保证父子一起删除保留完整关系。现有语义与既有调用不受影响。
+    private val onTrashed: suspend (taskId: String) -> Unit = {},
+    // T08/#9 纯新增：待办截止编辑/延期成功后的提醒重算钩子，默认无操作；
+    // AppContainer 组装后注册为 ReminderUseCases::rescheduleForDueChange，
+    // 相对提醒随截止移动、独立时刻提醒不动。不改既有语义。
+    private val onDueChanged: suspend (taskId: String) -> Unit = {},
+    // T08/#9 纯新增：待办取消成功后的提醒停止钩子，默认无操作
+    // （GLOSSARY：取消待办同时停止该待办自身的提醒）。不改既有语义。
+    private val onCancelled: suspend (taskId: String) -> Unit = {},
 ) {
 
     suspend fun create(input: TaskInput): Result<TodoTask> {
@@ -67,6 +79,7 @@ class TaskUseCases(
             updatedAt = now(),
         )
         repository.upsertTask(updated)
+        onDueChanged(id)
         return Result.success(updated)
     }
 
@@ -101,10 +114,11 @@ class TaskUseCases(
             updatedAt = t,
         )
         repository.upsertTask(updated)
+        onDueChanged(id)
         return Result.success(updated)
     }
 
-    /** 取消：决定不再执行并保留业务记录，同时与删除区分。 */
+    /** 取消：决定不再执行并保留业务记录，同时与删除区分；提醒一并停止（#9）。 */
     suspend fun cancel(id: String): Result<TodoTask> {
         val current = repository.getTask(id)
             ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
@@ -115,14 +129,16 @@ class TaskUseCases(
             updatedAt = t,
         )
         repository.upsertTask(updated)
+        onCancelled(id)
         return Result.success(updated)
     }
 
-    /** 普通删除：标记回收站并从正常查询排除，不永久删除。 */
+    /** 普通删除：标记回收站并从正常查询排除，不永久删除；子任务联动进入回收站（#8）。 */
     suspend fun trash(id: String): Result<Unit> {
         val current = repository.getTask(id)
             ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
         repository.trashTask(id, now())
+        onTrashed(id)
         return Result.success(Unit)
     }
 
