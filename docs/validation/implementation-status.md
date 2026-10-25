@@ -1,58 +1,51 @@
-# 首版实施状态
+# 首版实施状态（2026-10-25 22:45 更新）
 
-规格：[#1](https://github.com/shangyunqiang1/ZhiDeer/issues/1)。集成分支：`codex/mvp-integration`，起点 `c594097168f0aea29a3ad3a2a16205429af28586`。状态日期：2026-10-25（Asia/Shanghai）。
+规格：[#1](https://github.com/shangyunqiang1/ZhiDeer/issues/1)。集成分支：`codex/mvp-integration`，起点 `c594097`，当前 tip 见 `git log`。状态日期：2026-10-25（Asia/Shanghai）。
+本文件是快照，**以 GitHub Issues 的开放/关闭状态与验收评论为准**。
 
-2026-10-25：[#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) 验收条件已满足——固定 MyBrain 提交真实构建通过、持久化写入重读探针通过、工程基线确定为独立实现；issue 待关闭。[#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) 设备信息已核验但运行能力未验证，且早期证据 JSON 因 Temp 清理丢失需重采。无产品代码提交；探针与全部工具位于仓库外 `G:/ZhiDeer-tools`。
+## 总览
 
-工程证据见 [T01](t01-engineering-baseline.md)，设备准备与证据见 [T02](t02-oppo-device.md)。目标手机 OPPO Reno10 5G 已通过 USB 调试授权，实际读取型号代码 PHW110、Android 15/API 35、ColorOS V15.0.0；通知、语音与系统时钟的运行能力仍待验证。没有已交付的产品 APK。
+- 37 个 issue 中 **27 个已关闭**；开放：#1（规格）、#3、#11、#18、#24、#25、#26、#31、#36、#37。
+- 工程：`android-app/` 单模块 Kotlin + Compose + Room（schema v15，含 15 个 schema JSON）、手动 DI。
+- 测试：集成分支全量单测 **367 个 / 26 个测试类 / 0 失败**，`:app:assembleDebug` 通过（日志 `G:/ZhiDeer-tools/logs/build-integration.log`）。
+- 设备：OPPO Reno10 5G（PHW110，Android 15 / API 35，ColorOS V15.0.0，Asia/Shanghai）。
 
-## 任务依赖快照
+## 已关闭（27）
 
-以下依据本轮读取的 GitHub Issues 正文；后续以远端最新状态和依赖为准。
+| Ticket | 目标 | 证据 |
+|---|---|---|
+| #2 | 工程基线 | 构建 + 持久化探针通过，结论=独立实现（`docs/validation/t01-engineering-baseline.md`） |
+| #4 / #5 / #6 | 待办 / 日程 / 便签 | 单测 + 模拟器冒烟 |
+| #7 / #8 | 待办×日程关联 / 父子与子任务 | 单测（`TaskScheduleLinkUseCasesTest`、`SubTaskUseCasesTest`） |
+| #9 / #10 | 待办提醒 / 日程提醒 | 实机产品级投递证据（`docs/validation/t02-oppo-device.md` 2026-10-25 晚章节） |
+| #12–#17 | 状态联动 / 重复 / 例外 / 步骤 / 回收站 | 单测（`InterlockUseCasesTest`、`RecurrenceUseCasesTest`、`OccurrenceSubTaskUseCasesTest`、`RecycleBinUseCasesTest`） |
+| #19–#22 | 授权上下文 / AI 创建与修改 | 单测 + MockWebServer |
+| #23 | AI 管理重复及父子待办 | 合并 `ba0543f`，新增 10 例端到端测试 |
+| #27–#29 | 长期记忆 / 删除边界 / 聊天记忆 | 单测（`MemoryUseCasesTest`、`AiMemoryTest`） |
+| #30 | 参谋建议 | 单测（`AdvisorUseCasesTest`） |
+| #31 | 采纳建议与拒绝过期操作 | 合并 `8f9029b`，新增 15 例（UI 实机走查待补） |
+| #32 / #33 | 加密备份导出 / 核对并整库恢复 | 单测（`BackupUseCasesTest`） |
+| #34 | 完整备份恢复记忆与建议 | 合并 `f3874a2`，新增 7 例 |
+| #35 | 首页真实数据仪表盘与五底栏 | 单测 + 设备截图 |
 
-| Ticket | 目标 | 前置任务 | 本地状态 |
-| --- | --- | --- | --- |
-| [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) | [T01] 验证并确定工程基线 | 无 | **已关闭（2026-10-25）**：构建+探针通过，基线=独立实现 |
-| [#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) | [T02] 验证 OPPO 设备能力 | 无 | 探针就绪；实机 D01-D10 最后统一验收 |
-| [#4](https://github.com/shangyunqiang1/ZhiDeer/issues/4) | [T03] 离线管理单次待办 | #2 | **已关闭（2026-10-25）**：a217f3b，7 测试绿+模拟器冒烟 |
-| [#5](https://github.com/shangyunqiang1/ZhiDeer/issues/5) | [T04] 管理本地日历安排 | #2 | **已关闭（2026-10-25）**：01224d4，10 测试绿+月视图验证 |
-| [#6](https://github.com/shangyunqiang1/ZhiDeer/issues/6) | [T05] 记录和检索便签 | #2 | **已关闭（2026-10-25）**：eb4057e，9 测试绿 |
-| [#7](https://github.com/shangyunqiang1/ZhiDeer/issues/7) | [T06] 为待办安排执行时段 | #4、#5 | 实现中（后台子代理） |
-| [#8](https://github.com/shangyunqiang1/ZhiDeer/issues/8) | [T07] 管理父待办和子任务 | #4 | 实现中（后台子代理） |
-| [#9](https://github.com/shangyunqiang1/ZhiDeer/issues/9) | [T08] 为待办设置本地提醒 | #3、#4 | 未启动 |
-| [#10](https://github.com/shangyunqiang1/ZhiDeer/issues/10) | [T09] 为日程设置并调整提醒 | #5、#9 | 未启动 |
-| [#11](https://github.com/shangyunqiang1/ZhiDeer/issues/11) | [T10] 恢复设备变化后的提醒 | #9 | 未启动 |
-| [#12](https://github.com/shangyunqiang1/ZhiDeer/issues/12) | [T11] 联动处理事项状态和提醒 | #7、#8、#10 | 未启动 |
-| [#13](https://github.com/shangyunqiang1/ZhiDeer/issues/13) | [T12] 执行每日和每周重复待办 | #9 | 未启动 |
-| [#14](https://github.com/shangyunqiang1/ZhiDeer/issues/14) | [T13] 执行每月重复待办 | #13 | 未启动 |
-| [#15](https://github.com/shangyunqiang1/ZhiDeer/issues/15) | [T14] 调整重复待办与例外日期 | #13 | 未启动 |
-| [#16](https://github.com/shangyunqiang1/ZhiDeer/issues/16) | [T15] 重复执行子任务步骤 | #8、#15 | 未启动 |
-| [#17](https://github.com/shangyunqiang1/ZhiDeer/issues/17) | [T16] 恢复及彻底删除回收站事项 | #6、#12 | 未启动 |
-| [#18](https://github.com/shangyunqiang1/ZhiDeer/issues/18) | [T17] 配置 DeepSeek 并进行中文对话 | #2 | 未启动 |
-| [#19](https://github.com/shangyunqiang1/ZhiDeer/issues/19) | [T18] 授权上下文并查询真实事项 | #4、#5、#6、#18 | 未启动 |
-| [#20](https://github.com/shangyunqiang1/ZhiDeer/issues/20) | [T19] 通过 AI 确认创建便签和待办 | #19 | 未启动 |
-| [#21](https://github.com/shangyunqiang1/ZhiDeer/issues/21) | [T20] 通过 AI 创建日程和提醒 | #10、#20 | 未启动 |
-| [#22](https://github.com/shangyunqiang1/ZhiDeer/issues/22) | [T21] 通过 AI 修改和删除事项 | #17、#21 | 未启动 |
-| [#23](https://github.com/shangyunqiang1/ZhiDeer/issues/23) | [T22] 通过 AI 管理重复及父子待办 | #14、#16、#22 | 未启动 |
-| [#24](https://github.com/shangyunqiang1/ZhiDeer/issues/24) | [T23] 语音输入与中文播报 | #3、#18 | 未启动 |
-| [#25](https://github.com/shangyunqiang1/ZhiDeer/issues/25) | [T24] 交接系统时钟并核对状态 | #2、#3 | 未启动 |
-| [#26](https://github.com/shangyunqiang1/ZhiDeer/issues/26) | [T25] 通过 AI 提出系统闹钟操作 | #21、#25 | 未启动 |
-| [#27](https://github.com/shangyunqiang1/ZhiDeer/issues/27) | [T26] 手动保存和管理长期记忆 | #6、#18 | 未启动 |
-| [#28](https://github.com/shangyunqiang1/ZhiDeer/issues/28) | [T27] 落实记忆与来源的删除边界 | #17、#19、#27 | 未启动 |
-| [#29](https://github.com/shangyunqiang1/ZhiDeer/issues/29) | [T28] 在聊天中记住和检索偏好 | #20、#28 | 未启动 |
-| [#30](https://github.com/shangyunqiang1/ZhiDeer/issues/30) | [T29] 主动生成有依据的参谋建议 | #7、#29 | 未启动 |
-| [#31](https://github.com/shangyunqiang1/ZhiDeer/issues/31) | [T30] 确认采纳建议并拒绝过期操作 | #22、#30 | 未启动 |
-| [#32](https://github.com/shangyunqiang1/ZhiDeer/issues/32) | [T31] 导出手动加密备份 | #4、#5、#6、#18 | 未启动 |
-| [#33](https://github.com/shangyunqiang1/ZhiDeer/issues/33) | [T32] 核对备份并整库恢复 | #9、#19、#32 | 未启动 |
-| [#34](https://github.com/shangyunqiang1/ZhiDeer/issues/34) | [T33] 完整备份恢复记忆和建议 | #31、#33 | 未启动 |
-| [#35](https://github.com/shangyunqiang1/ZhiDeer/issues/35) | [T34] 汇总今天的真实安排 | #30 | 未启动 |
-| [#36](https://github.com/shangyunqiang1/ZhiDeer/issues/36) | [T35] 查看权限和故障诊断 | #11、#24、#25、#29 | 未启动 |
-| [#37](https://github.com/shangyunqiang1/ZhiDeer/issues/37) | [T36] 完成首版 OPPO 集成验收 | #23、#26、#34、#35、#36 | 未启动 |
+## 开放与推进状态（10）
 
-## 继续执行
+| Ticket | 状态 | 说明 |
+|---|---|---|
+| #1 规格 | 待全部子任务关闭后关闭 | — |
+| #3 设备能力 | **部分实证** | D01/D02/D04/D09/D10 有运行证据；D03 重启恢复真机已验（见 `docs/validation/t10-restore.md`），D05 改时间/时区、D06/D07 麦克风与识别、D08 TTS 待本轮补齐 |
+| #11 恢复设备变化后的提醒 | **实现已合并**；真机 D1/D2 已通过 | 待 D3/D4/D5/D7 真机步骤后关闭；实测 ColorOS 默认拦截第三方 BOOT_COMPLETED，靠应用启动兜底 |
+| #18 DeepSeek 配置与对话 | 代码与 Mock 测试就绪 | **等用户在小鹿页填入 Key** 后做真实连接证据 |
+| #24 语音输入与中文播报 | **实现已合并** `9260f55`；真机验收进行中 | 无识别服务→键盘回退；TTS 默认关闭 |
+| #25 系统时钟交接 | 实现完成并合并 `6943036` | 真机 D09 + 模拟器 D10 无 handler 证据齐；待 #3 关闭 |
+| #26 AI 系统闹钟提案 | 实现中（独立工作树） | 依赖 #25 代码（已合并） |
+| #31 采纳建议与拒绝过期 | 实现已合并 `8f9029b` | 代码与测试齐；UI 实机走查待补后关闭 |
+| #36 权限与故障诊断 | 实现中（独立工作树） | 复用 #11 能力探针 / #24 语音 / #18 连接测试 |
+| #37 首版 OPPO 集成验收 | 待 #23/#26/#34/#35/#36 全绿后执行 | 映射 AT-01~AT-12 |
 
-1. [#2](https://github.com/shangyunqiang1/ZhiDeer/issues/2) 验收条件已满足（2026-10-25，证据见 [T01](t01-engineering-baseline.md) 末章）：固定提交真实构建 BUILD SUCCESSFUL、文件级 Room 写入→关闭→重开→重读探针 PASSED、androidHostTest 62/62、工程基线确定为独立实现。待关闭（gh 无凭据，需用户 `gh auth login` 或手动关闭）。下游 #4/#5/#6/#18/#25 据此解锁。
-2. OPPO 已授权 USB 调试；独立能力探针应用已实现并构建成功（`tools/validation/device/probe-app`，见 [T02](t02-oppo-device.md)），但未实机运行。实机重连后重新采集设备证据并执行 D01–D10：通知、精确提醒、重启恢复、语音与系统时钟仍全部未验证，[#3](https://github.com/shangyunqiang1/ZhiDeer/issues/3) 不关闭。
-3. 仅当相应前置任务真正完成后推进依赖图；实现使用统一业务用例入口、真实持久化及受控平台适配器验证，交付时另补必要实机证据。
-4. 每个实现单元在独立 worktree 中基于集成分支执行，合并前同步集成分支；审查并验证后再按任务跟踪约定关闭已满足验收条件的任务。
+## 环境与工具（摘要，详见 `G:/ZhiDeer-tools/handoff-20261025.md`）
 
+- 构建：`G:/ZhiDeer-tools/run-build-worktree.ps1 -Root <仓库或工作树>`，日志 `G:/ZhiDeer-tools/logs/build-<name>.log`。
+- 工作树：`git -c safe.directory=* -C G:/ZhiDeer worktree add G:/ZhiDeer-worktrees/<name> -b <branch> codex/mvp-integration`。
+- 证据：`G:/ZhiDeer-tools/evidence/device/`（截图、`dumpsys`、`logcat events` 摘要）。
+- 已知：AGP 9.3 自带 Kotlin（勿加 kotlin-android 插件）；Robolectric 测试用 `AndroidSQLiteDriver`；C 盘易满，临时文件已重定向到 G 盘；并行构建时 MockWebServer 偶发 localhost 超时（已放宽测试超时）。

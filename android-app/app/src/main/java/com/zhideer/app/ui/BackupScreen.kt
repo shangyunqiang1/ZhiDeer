@@ -42,6 +42,14 @@ import java.time.format.DateTimeFormatter
 private val backupTimeFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 private val backupFileNameFmt = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
 
+/**
+ * 旧备份边界（T33/#34、用户故事 88）：应用无法修改用户已经导出的旧备份文件，
+ * 恢复后后来被彻底删除的数据可能重新出现——不承诺删除当前数据会改写旧备份。
+ * 导出/恢复界面与确认对话框共用这段说明，避免只在一处提示。
+ */
+internal const val BACKUP_OLD_DATA_BOUNDARY =
+    "应用无法修改您已导出的旧备份：恢复后，您后来彻底删除的记忆、事项或反馈记录可能重新出现，请按需要重新清理"
+
 /** 备份表名 → 中文标签（展示用，顺序与 BACKUP_TABLES 一致）。 */
 private val backupTableLabels = mapOf(
     "tasks" to "待办",
@@ -54,21 +62,25 @@ private val backupTableLabels = mapOf(
     "calendar_reminders" to "日程提醒",
     "occurrence_subtask_records" to "出现步骤记录",
     "memories" to "长期记忆",
+    "clock_handoffs" to "系统时钟交接",
 )
 
 /**
- * 备份主界面（T31/#32 导出 + T32/#33 恢复）。
+ * 备份主界面（T31/#32 导出 + T32/#33 恢复 + T33/#34 记忆来源与参谋记录）。
  * 导出：
- * - 导出前说明备份所含内容与潜在隐私数据（个人事项与对话内容）；
+ * - 导出前说明备份所含内容与潜在隐私数据（个人事项、对话内容、长期记忆来源、
+ *   参谋建议反馈与执行记录、系统时钟交接记录）；
  * - 要求独立备份口令：两次输入一致才可导出，明示忘记口令无法恢复；
  *   口令不会出现在文件名、日志或备份内容中；API Key 与本机配置绝不进入备份；
  * - 导出中禁用按钮；成功展示文件位置、格式版本、数据库版本、导出时间与各表计数摘要；
  * - 失败给出中文提示且不显示成功摘要（失败绝不报告成可用备份）。
- * 恢复（T32/#33）：核对 → 确认覆盖 → 整库替换：
- * - 输入备份文件路径与口令，先只读核对（口令、内容、格式、版本兼容）并展示可理解摘要；
- * - 核对通过后明示恢复将覆盖当前全部数据（不合并）、旧备份可能包含已彻底删除的数据、
- *   提醒恢复后先暂停、AI 授权需重新确认，并要求对话框二次确认；
- * - 不兼容/损坏/口令错误绝不覆盖当前数据；恢复完成展示各表计数与暂停提醒清单。
+ * 恢复（T32/#33/T33/#34）：核对 → 确认覆盖 → 整库替换：
+ * - 输入备份文件路径与口令，先只读核对（口令、内容、格式、版本兼容）并展示可理解摘要
+ *   （含会话与参谋记录计数）；
+ * - 核对通过后明示恢复将覆盖当前全部数据（不合并）、旧备份可能包含已彻底删除的数据
+ *   （[BACKUP_OLD_DATA_BOUNDARY]）、提醒恢复后先暂停、旧参谋提案失效、AI 授权需重新确认，
+ *   并要求对话框二次确认；
+ * - 不兼容/损坏/口令错误绝不覆盖当前数据；恢复完成展示各表计数、参谋记录计数与暂停提醒清单。
  * MVP 导出位置为应用外部文件目录并展示绝对路径；SAF「另存为」由后续任务补齐。
  * 公开 composable，由 Root 挂导航。
  */
@@ -113,7 +125,11 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("备份将包含以下内容", style = MaterialTheme.typography.titleSmall)
                     Text("· 待办、日程、便签（含回收站记录）及其全部本地关系", style = MaterialTheme.typography.bodySmall)
-                    Text("· AI 会话历史与长期记忆", style = MaterialTheme.typography.bodySmall)
+                    Text("· AI 会话历史、长期记忆及其来源引用（含停用与来源缺失状态）", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "· 参谋建议的反馈、采纳执行记录与依据绑定，以及系统时钟交接记录",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Text("· 不包含 API Key 与本机配置，配置不会被导出", style = MaterialTheme.typography.bodySmall)
                     HorizontalDivider(Modifier.padding(vertical = 4.dp))
                     Text(
@@ -210,6 +226,12 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Text("会话：${result.aiSessionCount} 个", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "参谋记录：反馈 ${result.advisorFeedbackCount} 条、" +
+                                "采纳执行 ${result.advisorAdoptionCount} 条、" +
+                                "依据绑定 ${result.advisorBindingCount} 条",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         HorizontalDivider(Modifier.padding(vertical = 4.dp))
                         result.tableCounts.forEach { (table, count) ->
                             Text(
@@ -230,15 +252,20 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("从备份恢复", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "恢复会用备份内容整体替换当前全部数据（不与现有数据合并）。" +
-                            "旧备份可能包含您后来已彻底删除的数据，恢复后无法找回当前新数据，" +
-                            "建议先在上方导出一份当前数据的备份。",
+                        "恢复会用备份内容整体替换当前全部数据（不与现有数据合并），" +
+                            "恢复后无法找回当前新数据；建议先在上方导出一份当前数据的备份。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        "恢复后所有提醒将先暂停，需您逐项确认后才会重新启用；" +
-                            "AI 上下文授权需重新确认；API Key 与本机配置不受恢复影响。",
+                        "$BACKUP_OLD_DATA_BOUNDARY。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "恢复后所有提醒将先暂停、本机调度状态会重置，需您逐项确认后才会重新启用；" +
+                            "恢复前的待确认参谋提案会失效、AI 上下文授权需重新确认；" +
+                            "API Key 与本机配置不受恢复影响。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -303,6 +330,12 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Text("会话：${info.aiSessionCount} 个", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "参谋记录：反馈 ${info.advisorFeedbackCount} 条、" +
+                                "采纳执行 ${info.advisorAdoptionCount} 条、" +
+                                "依据绑定 ${info.advisorBindingCount} 条",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         HorizontalDivider(Modifier.padding(vertical = 4.dp))
                         info.tableCounts.forEach { (table, count) ->
                             Text(
@@ -357,6 +390,12 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Text("会话：${result.aiSessionCount} 个（已还原）", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "参谋记录：反馈 ${result.advisorFeedbackCount} 条、" +
+                                "采纳执行 ${result.advisorAdoptionCount} 条、" +
+                                "依据绑定 ${result.advisorBindingCount} 条（已还原）",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         HorizontalDivider(Modifier.padding(vertical = 4.dp))
                         result.tableCounts.forEach { (table, count) ->
                             Text(
@@ -377,7 +416,13 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Text(
-                            "请在待办与日程中逐项确认启用提醒；AI 上下文授权需重新确认；API Key 与本机配置未受影响。",
+                            "请在待办与日程中逐项确认启用提醒；恢复前的待确认参谋提案已失效，" +
+                                "请重新生成建议并确认；AI 上下文授权需重新确认；API Key 与本机配置未受影响。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "$BACKUP_OLD_DATA_BOUNDARY。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -403,9 +448,9 @@ fun BackupScreen(useCases: BackupUseCases, exportDirectory: File) {
                         Text(
                             "将用该备份整体替换当前全部数据，且不与现有数据合并，当前新数据将无法找回。\n\n" +
                                 "· 建议先导出一份当前数据的备份；\n" +
-                                "· 旧备份可能包含您后来已彻底删除的数据；\n" +
+                                "· $BACKUP_OLD_DATA_BOUNDARY；\n" +
                                 "· 恢复后所有提醒先暂停，经您逐项确认后重新启用；\n" +
-                                "· AI 上下文授权需重新确认，API Key 不受影响。",
+                                "· 待确认的旧参谋提案会失效、AI 上下文授权需重新确认，API Key 不受影响。",
                         )
                     },
                     confirmButton = {

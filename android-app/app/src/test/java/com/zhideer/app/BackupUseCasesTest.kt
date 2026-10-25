@@ -4,27 +4,53 @@ import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.AndroidSQLiteDriver
 import androidx.test.core.app.ApplicationProvider
+import com.zhideer.app.data.ai.AdvisorRecordStore
+import com.zhideer.app.data.ai.AiProposalStore
 import com.zhideer.app.data.ai.AiSessionStore
 import com.zhideer.app.data.db.CalendarEntryEntity
 import com.zhideer.app.data.db.CalendarReminderEntity
+import com.zhideer.app.data.db.ClockHandoffEntity
 import com.zhideer.app.data.db.MemoryEntity
 import com.zhideer.app.data.db.NoteEntity
 import com.zhideer.app.data.db.NoteListItemEntity
 import com.zhideer.app.data.db.OccurrenceSubTaskRecordEntity
 import com.zhideer.app.data.db.ReminderEntity
+import com.zhideer.app.data.db.ReminderScheduleEntity
 import com.zhideer.app.data.db.SubTaskEntity
 import com.zhideer.app.data.db.TaskEntity
 import com.zhideer.app.data.db.TaskOccurrenceEntity
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.data.repository.CalendarRepositoryImpl
+import com.zhideer.app.data.repository.MemoriesRepositoryImpl
 import com.zhideer.app.data.repository.RemindersRepositoryImpl
+import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
+import com.zhideer.app.domain.model.AdvisorAdoptionOutcome
+import com.zhideer.app.domain.model.AdvisorAdoptionRecord
+import com.zhideer.app.domain.model.AdvisorEvidenceSnapshot
+import com.zhideer.app.domain.model.AdvisorFeedbackRecord
+import com.zhideer.app.domain.model.AdvisorFeedbackType
+import com.zhideer.app.domain.model.AdvisorProposalBinding
+import com.zhideer.app.domain.model.AdvisorRecords
 import com.zhideer.app.domain.model.AiChatMessage
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
+import com.zhideer.app.domain.model.AiProposal
+import com.zhideer.app.domain.model.AiProposalKind
+import com.zhideer.app.domain.model.AiProposalStatus
+import com.zhideer.app.domain.model.ClockHandoffStatus
+import com.zhideer.app.domain.usecase.AdvisorUseCases
+import com.zhideer.app.domain.usecase.AiContextAuthorizer
+import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.BackupUseCases
+import com.zhideer.app.domain.usecase.CalendarUseCases
+import com.zhideer.app.domain.usecase.MemoryUseCases
 import com.zhideer.app.domain.usecase.ReminderUseCases
+import com.zhideer.app.domain.usecase.TaskUseCases
 import com.zhideer.app.platform.AlarmScheduler
+import com.zhideer.app.ui.BACKUP_OLD_DATA_BOUNDARY
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -57,12 +83,15 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * T31/#32 验收测试：手动加密备份导出。
- * - 全部用户数据表 + AI 会话历史进入备份，密文不含明文数据与口令；
+ * T31/#32 备份导出与 T32/#33 整库恢复验收测试，T33/#34 扩展记忆来源与参谋记录：
+ * - 全部用户数据表（含 memories、clock_handoffs）+ AI 会话历史 + 参谋记录进入备份，
+ *   密文不含明文数据与口令；
  * - 独立口令 PBKDF2 + AES-GCM 加密，格式版本化，可核对完整性与版本信息；
  * - 错误口令不可读取（中文提示）；导出失败不报告成功、不留损坏文件；
- * - API Key 与本机配置绝不进入备份内容。
- * 走真实 Room 文件库（close-reopen）+ AndroidSQLiteDriver + 真实 AiSessionStore。
+ * - API Key 与本机配置绝不进入备份内容；
+ * - 恢复保持记忆来源/停用状态；不可核验来源不被恢复成可用事实；
+ * - 恢复后旧参谋提案失效、AI 授权重新确认、提醒先暂停规则继续生效。
+ * 走真实 Room 文件库（close-reopen）+ AndroidSQLiteDriver + 真实 DataStore。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -75,6 +104,12 @@ class BackupUseCasesTest {
     private lateinit var db: ZhiDeerDatabase
     private lateinit var sessionFile: File
     private lateinit var sessionStore: AiSessionStore
+    private lateinit var advisorFile: File
+    private lateinit var advisorStore: AdvisorRecordStore
+    private lateinit var proposalFile: File
+    private lateinit var proposalStore: AiProposalStore
+    private lateinit var authorizer: AiContextAuthorizer
+    private lateinit var advisor: AdvisorUseCases
     private lateinit var exportDir: File
     private lateinit var useCases: BackupUseCases
     private val clock = mutableListOf(1769000000000L)
@@ -90,6 +125,11 @@ class BackupUseCasesTest {
         exportDir = File(context.filesDir, "t31_backup_out").apply { mkdirs() }
         exportDir.listFiles()?.forEach { it.deleteRecursively() }
         sessionStore = AiSessionStore(sessionFile)
+        advisorFile = File(context.filesDir, "t33_advisor_records.preferences_pb").apply { delete() }
+        advisorStore = AdvisorRecordStore(advisorFile)
+        proposalFile = File(context.filesDir, "t33_ai_proposals.preferences_pb").apply { delete() }
+        proposalStore = AiProposalStore(proposalFile)
+        authorizer = AiContextAuthorizer()
         open()
     }
 
@@ -101,12 +141,43 @@ class BackupUseCasesTest {
             .setDriver(AndroidSQLiteDriver())
             .setQueryCoroutineContext(Dispatchers.IO)
             .build()
+        // 参谋记录还原与生产装配一致：恢复备份记录，并让恢复前待确认的旧建议提案失效
+        advisor = AdvisorUseCases(
+            taskUseCases = TaskUseCases(
+                repository = TasksRepositoryImpl(db.taskDao(), Dispatchers.IO),
+                idGen = { "task-gen" },
+                now = { clock.last() },
+                zoneId = zone.id,
+                occurrenceRepository = TaskOccurrenceRepositoryImpl(db.taskOccurrenceDao(), Dispatchers.IO),
+            ),
+            calendarUseCases = CalendarUseCases(
+                repository = CalendarRepositoryImpl(db.calendarEntryDao(), Dispatchers.IO),
+                idGen = { "entry-gen" },
+                now = { clock.last() },
+                zoneId = zone.id,
+            ),
+            memoryUseCases = MemoryUseCases(
+                repository = MemoriesRepositoryImpl(db.memoryDao(), Dispatchers.IO),
+                idGen = { "memory-gen" },
+                now = { clock.last() },
+            ),
+            authorizer = authorizer,
+            proposalStore = proposalStore,
+            recordStore = advisorStore,
+            idGen = { "advisor-gen" },
+            now = { clock.last() },
+            zoneId = zone,
+        )
         useCases = BackupUseCases(
             database = db,
             sessionHistory = { sessionStore.load() },
             now = { clock.last() },
             // 恢复出口与生产装配（AppContainer）一致：Room 事务成功后还原会话历史
             sessionRestorer = { sessions -> sessionStore.save(sessions) },
+            // T33/#34：参谋记录（反馈/采纳执行记录/依据绑定）与 AI 授权重置
+            advisorHistory = { advisorStore.load() },
+            advisorRestorer = { records -> advisor.restoreAdvisorRecords(records) },
+            aiAuthorizationResetter = { authorizer.revoke() },
         )
     }
 
@@ -120,6 +191,8 @@ class BackupUseCasesTest {
     fun tearDown() {
         db.close()
         sessionStore.close()
+        advisorStore.close()
+        proposalStore.close()
     }
 
     // ---------- 造数：全部用户数据表各至少一行（外键依赖按父先后插入） ----------
@@ -202,6 +275,13 @@ class BackupUseCasesTest {
                 createdAt = 1L, updatedAt = 1L, verifiedAt = 1L, expiresAt = null,
             ),
         )
+        db.clockHandoffDao().upsert(
+            ClockHandoffEntity(
+                id = "handoff-1", hour = 7, minute = 30, label = "晨跑",
+                targetEpochDay = null, weekdays = "", requestedAtMillis = 1L,
+                status = ClockHandoffStatus.PENDING_CHECK.name, note = "系统未返回保存回执，待核对",
+            ),
+        )
     }
 
     private fun seedSession(): AiChatSession = AiChatSession(
@@ -214,6 +294,93 @@ class BackupUseCasesTest {
         createdAt = 5L,
         updatedAt = 6L,
     )
+
+    /**
+     * 记忆来源关联（T33/#34）：来源缺失且已停用、来源记录已彻底删除两种状态。
+     * 恢复必须保持原文、来源 id、来源缺失与停用状态，不得重新启用。
+     */
+    private fun seedMemorySources() = runBlocking {
+        db.memoryDao().upsert(
+            MemoryEntity(
+                id = "memory-src", content = "购物清单里写过我喜欢低糖",
+                type = "PREFERENCE", source = "MANUAL", confirmed = true, enabled = false,
+                createdAt = 2L, updatedAt = 2L, verifiedAt = 2L, expiresAt = null,
+                sourceRefType = "NOTE", sourceRefId = "note-1", sourceRefMissing = true,
+            ),
+        )
+        db.memoryDao().upsert(
+            MemoryEntity(
+                id = "memory-missing", content = "来源待办已删除的偏好",
+                type = "PREFERENCE", source = "MANUAL", confirmed = true, enabled = false,
+                createdAt = 3L, updatedAt = 3L, verifiedAt = 3L, expiresAt = null,
+                sourceRefType = "TASK", sourceRefId = "task-gone", sourceRefMissing = true,
+            ),
+        )
+    }
+
+    /** 参谋记录集合（T33/#34）：建议反馈、采纳执行记录与提案依据绑定（含依据快照与指纹）。 */
+    private fun advisorSeed(): AdvisorRecords = AdvisorRecords(
+        feedback = listOf(
+            AdvisorFeedbackRecord(
+                id = "feedback-1",
+                suggestionId = "overdue-task:task-1",
+                suggestionKind = "OVERDUE_TASK",
+                title = "处理过期待办「对芒果过敏的提醒」",
+                type = AdvisorFeedbackType.NEVER_SUGGEST,
+                adjustmentNote = "",
+                evidence = listOf(taskEvidence()),
+                createdAt = 10L,
+            ),
+            AdvisorFeedbackRecord(
+                id = "feedback-2",
+                suggestionId = "schedule-conflict:entry-1:entry-2",
+                suggestionKind = "SCHEDULE_CONFLICT",
+                title = "明天日程时间重叠",
+                type = AdvisorFeedbackType.ADJUST,
+                adjustmentNote = "改为明天下午",
+                evidence = emptyList(),
+                createdAt = 11L,
+            ),
+        ),
+        adoptions = listOf(
+            AdvisorAdoptionRecord(
+                id = "adoption-1",
+                suggestionId = "overdue-task:task-1",
+                suggestionKind = "OVERDUE_TASK",
+                title = "处理过期待办「对芒果过敏的提醒」",
+                proposalId = "proposal-history",
+                outcome = AdvisorAdoptionOutcome.INVALIDATED,
+                detail = "依据记录已变化：旧提案已失效，未执行任何写入",
+                createdAt = 12L,
+            ),
+        ),
+        bindings = listOf(
+            AdvisorProposalBinding(
+                proposalId = "proposal-history",
+                suggestionId = "overdue-task:task-1",
+                suggestionKind = "OVERDUE_TASK",
+                title = "处理过期待办「对芒果过敏的提醒」",
+                evidence = listOf(taskEvidence()),
+                basisFingerprint = "overdue-task:task-1|OVERDUE_TASK|TASK:task-1:TASK|snapshot",
+                createdAt = 13L,
+            ),
+        ),
+    )
+
+    private fun taskEvidence() = AdvisorEvidenceSnapshot(
+        recordKind = AiProposalKind.TASK,
+        recordId = "task-1",
+        title = "对芒果过敏的提醒",
+        detail = "待办「对芒果过敏的提醒」已过期未完成",
+        recordFingerprint = "TASK|snapshot",
+    )
+
+    private fun seedAdvisorRecords() = runBlocking {
+        val seed = advisorSeed()
+        for (record in seed.feedback) advisorStore.appendFeedback(record)
+        for (record in seed.adoptions) advisorStore.upsertAdoption(record)
+        for (binding in seed.bindings) advisorStore.bindProposal(binding)
+    }
 
     // ---------- 用例 ----------
 
@@ -275,6 +442,7 @@ class BackupUseCasesTest {
                 "calendar_reminders" to 1,
                 "occurrence_subtask_records" to 1,
                 "memories" to 1,
+                "clock_handoffs" to 1,
             ),
             payload.tableCounts,
         )
@@ -377,6 +545,7 @@ class BackupUseCasesTest {
             .apply()
 
         seedSampleData()
+        seedAdvisorRecords()
         reopen()
         val target = File(exportDir, "nokey.zdbak")
         useCases.exportAll(password, target).getOrThrow()
@@ -388,9 +557,10 @@ class BackupUseCasesTest {
         assertFalse("备份不应包含 API Key 特征串", plain.contains("sk-TEST-KEY-123456"))
         assertFalse("备份不应包含 apiKey 字段名", plain.contains("apiKey"))
 
-        // 结构断言：表清单恰好是全部用户数据表，无任何配置表混入
+        // 结构断言：表清单恰好是全部用户数据表，无任何配置表混入；参谋记录在范围内也不含 Key
         val payload = useCases.readPayload(target, password).getOrThrow()
         assertEquals(BackupUseCases.BACKUP_TABLES.toSet(), payload.tables.keys)
+        assertEquals("参谋记录应在备份范围内", 2, payload.advisorRecords.feedback.size)
     }
 
     @Test
@@ -731,6 +901,231 @@ class BackupUseCasesTest {
         assertTrue("提示应指出会话历史：$message", message.contains("会话"))
     }
 
+    // ==================== T33/#34 完整备份恢复记忆与建议 ====================
+
+    @Test
+    fun 备份恢复覆盖长期记忆来源与参谋记录且保持可追溯() = runBlocking {
+        seedSampleData()
+        seedMemorySources()
+        seedAdvisorRecords()
+        sessionStore.save(listOf(seedSession()))
+        reopen()
+        val target = File(exportDir, "t33-full.zdbak")
+
+        val exported = useCases.exportAll(password, target).getOrThrow()
+        val payload = useCases.readPayload(target, password).getOrThrow()
+
+        // 备份范围：11 张用户数据表（含 memories 与 clock_handoffs）+ 会话 + 参谋记录
+        assertEquals(3, payload.tableCounts.getValue("memories"))
+        assertEquals(1, payload.tableCounts.getValue("clock_handoffs"))
+        assertEquals("参谋记录应完整进入备份", advisorSeed(), payload.advisorRecords)
+        assertEquals(2, payload.advisorFeedbackCount)
+        assertEquals(1, payload.advisorAdoptionCount)
+        assertEquals(1, payload.advisorBindingCount)
+        assertEquals(2, exported.advisorFeedbackCount)
+        assertEquals(1, exported.advisorAdoptionCount)
+        assertEquals(1, exported.advisorBindingCount)
+
+        // 篡改当前：参谋记录清空、来源记忆删除、交接记录改写
+        advisorStore.replaceAll(AdvisorRecords())
+        db.memoryDao().deleteById("memory-src")
+        db.memoryDao().deleteById("memory-missing")
+        db.clockHandoffDao().upsert(
+            ClockHandoffEntity(
+                id = "handoff-1", hour = 6, minute = 0, label = "被改写的交接",
+                targetEpochDay = null, weekdays = "", requestedAtMillis = 999L,
+                status = ClockHandoffStatus.FAILED.name, note = "改写",
+            ),
+        )
+        reopen()
+
+        val summary = useCases.restoreAll(target, password).getOrThrow()
+
+        // 参谋记录完整还原（反馈、采纳执行记录、依据绑定，含依据快照与内容指纹）
+        assertEquals("参谋记录应完整还原", advisorSeed(), advisorStore.load())
+        assertEquals(2, summary.advisorFeedbackCount)
+        assertEquals(1, summary.advisorAdoptionCount)
+        assertEquals(1, summary.advisorBindingCount)
+
+        // 记忆与来源关联状态保持：停用、来源缺失、原文与类型
+        val sourced = db.memoryDao().get("memory-src")
+        assertNotNull("来源关联记忆应恢复", sourced)
+        assertEquals("NOTE", sourced!!.sourceRefType)
+        assertEquals("note-1", sourced.sourceRefId)
+        assertTrue("来源缺失状态应保持", sourced.sourceRefMissing)
+        assertFalse("恢复不得把停用记忆重新启用", sourced.enabled)
+        val missing = db.memoryDao().get("memory-missing")
+        assertNotNull(missing)
+        assertEquals("TASK", missing!!.sourceRefType)
+        assertEquals("task-gone", missing.sourceRefId)
+        assertTrue(missing.sourceRefMissing)
+        assertFalse(missing.enabled)
+        assertEquals("我对芒果过敏，推荐食谱时请避开", db.memoryDao().get("memory-1")?.content)
+
+        // 系统闹钟交接记录随备份还原（待核对状态保持，不伪造成已保存）
+        val handoff = db.clockHandoffDao().observeAll().first().firstOrNull { it.id == "handoff-1" }
+        assertNotNull(handoff)
+        assertEquals(ClockHandoffStatus.PENDING_CHECK.name, handoff!!.status)
+        assertEquals("晨跑", handoff.label)
+    }
+
+    @Test
+    fun 参谋记录计数与实际内容不一致的备份视为损坏() = runBlocking {
+        val payload = testPayload(dbVersion = currentDbVersion()).copy(advisorFeedbackCount = 1)
+        val file = rawBackupFile(payload, "t33-bad-advisor.zdbak")
+
+        val inspection = useCases.inspectBackup(file, password).getOrThrow()
+        assertFalse("参谋记录计数不一致应判为不完整", inspection.integrityOk)
+
+        val result = useCases.restoreAll(file, password)
+        assertTrue("损坏备份必须拒绝恢复", result.isFailure)
+        assertTrue(
+            "提示应说明损坏：${result.exceptionOrNull()?.message}",
+            result.exceptionOrNull()?.message.orEmpty().contains("损坏"),
+        )
+    }
+
+    @Test
+    fun 恢复后旧参谋提案失效且不可直接执行() = runBlocking {
+        seedSampleData()
+        proposalStore.save(
+            listOf(
+                AiProposal(
+                    id = "proposal-old",
+                    sessionId = null, // 参谋提案：由参谋面板展示与确认
+                    createdAt = 3L,
+                    status = AiProposalStatus.PENDING,
+                    items = emptyList(),
+                ),
+            ),
+        )
+        advisorStore.bindProposal(
+            AdvisorProposalBinding(
+                proposalId = "proposal-old",
+                suggestionId = "overdue-task:task-1",
+                suggestionKind = "OVERDUE_TASK",
+                title = "处理过期待办「对芒果过敏的提醒」",
+                evidence = listOf(taskEvidence()),
+                basisFingerprint = "fp-old",
+                createdAt = 3L,
+            ),
+        )
+        reopen()
+        val target = File(exportDir, "t33-stale-proposal.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+        reopen()
+
+        useCases.restoreAll(target, password).getOrThrow()
+
+        val restored = proposalStore.load().single()
+        assertEquals("恢复后旧参谋提案必须先失效", AiProposalStatus.EXPIRED, restored.status)
+        assertTrue(
+            "失效说明应要求重新生成：${restored.resultMessage}",
+            restored.resultMessage.orEmpty().contains("重新生成"),
+        )
+
+        val confirm = advisor.confirmAdoptedProposal("proposal-old")
+        assertTrue("旧提案不可直接执行", confirm.isFailure)
+        assertTrue(
+            "拒绝说明应为中文已失效：${confirm.exceptionOrNull()?.message}",
+            confirm.exceptionOrNull()?.message.orEmpty().contains("失效"),
+        )
+        assertEquals("旧提案不得修改业务数据", 2, countTable("tasks"))
+        assertTrue(
+            "确认被拒应留下可追溯的执行记录",
+            advisorStore.load().adoptions.any {
+                it.proposalId == "proposal-old" && it.outcome == AdvisorAdoptionOutcome.CANCELLED
+            },
+        )
+    }
+
+    @Test
+    fun 恢复成功后重置AI授权且失败恢复不重置() = runBlocking {
+        seedSampleData()
+        reopen()
+        val target = File(exportDir, "t33-auth.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+
+        authorizer.grant(setOf(AiContextCategory.MEMORY, AiContextCategory.TASKS))
+        assertNotNull("前置：应已有授权", authorizer.currentGrant())
+
+        val failed = useCases.restoreAll(target, "错误口令-999")
+        assertTrue(failed.isFailure)
+        assertNotNull("恢复失败不得改变 AI 授权状态", authorizer.currentGrant())
+
+        useCases.restoreAll(target, password).getOrThrow()
+        assertNull("恢复数据后 AI 上下文授权必须重新确认", authorizer.currentGrant())
+    }
+
+    @Test
+    fun 恢复不会把不可核验来源的记忆变成可用事实() = runBlocking {
+        // 构造历史/异常备份：来源缺失标记为真但 enabled 仍为 1
+        val row = buildJsonObject {
+            put("id", JsonPrimitive("memory-unsafe"))
+            put("content", JsonPrimitive("来源已不存在的偏好"))
+            put("type", JsonPrimitive("PREFERENCE"))
+            put("source", JsonPrimitive("MANUAL"))
+            put("confirmed", JsonPrimitive(1L))
+            put("enabled", JsonPrimitive(1L))
+            put("createdAt", JsonPrimitive(1L))
+            put("updatedAt", JsonPrimitive(1L))
+            put("verifiedAt", JsonPrimitive(1L))
+            put("expiresAt", JsonNull)
+            put("sourceRefType", JsonPrimitive("TASK"))
+            put("sourceRefId", JsonPrimitive("task-gone"))
+            put("sourceRefMissing", JsonPrimitive(1L))
+        }
+        val payload = testPayload(currentDbVersion(), overrides = mapOf("memories" to listOf(row)))
+        val file = rawBackupFile(payload, "t33-unsafe-memory.zdbak")
+
+        useCases.restoreAll(file, password).getOrThrow()
+
+        val restored = db.memoryDao().get("memory-unsafe")
+        assertNotNull(restored)
+        assertTrue("来源缺失状态必须保持", restored!!.sourceRefMissing)
+        assertFalse("不可核验来源的记忆不得恢复为启用事实", restored.enabled)
+
+        val active = MemoryUseCases(
+            repository = MemoriesRepositoryImpl(db.memoryDao(), Dispatchers.IO),
+            idGen = { "memory-gen" },
+            now = { clock.last() },
+        ).observeActive().first()
+        assertTrue("可用记忆集合不得包含来源缺失条目", active.none { it.id == "memory-unsafe" })
+    }
+
+    @Test
+    fun 恢复会重置设备本地调度台账且台账不进入备份() = runBlocking {
+        seedSampleData()
+        db.reminderScheduleLogDao().insertPending(
+            ReminderScheduleEntity(
+                reminderKey = "rem-1|1769000000000",
+                scheduledAtMillis = 1769000000000L,
+                ownerId = "task-1",
+                ownerTitle = "对芒果过敏的提醒",
+                state = "PENDING",
+                recordedAtMillis = 1L,
+            ),
+        )
+        reopen()
+        val target = File(exportDir, "t33-ledger.zdbak")
+        useCases.exportAll(password, target).getOrThrow()
+
+        // 调度台账是设备本地的调度/投递状态，不属于用户数据，不进入备份
+        val payload = useCases.readPayload(target, password).getOrThrow()
+        assertFalse("设备本地调度台账不应进入备份", payload.tables.containsKey("reminder_schedule_log"))
+
+        useCases.restoreAll(target, password).getOrThrow()
+        // 旧台账必须清空：避免旧终态抑制重新启用的提醒，或把本机未调度的事实伪装成已投递
+        assertEquals(0, countTable("reminder_schedule_log"))
+    }
+
+    @Test
+    fun 界面文案明确旧备份数据可能重新出现的边界() {
+        assertTrue("应说明应用无法修改旧备份", BACKUP_OLD_DATA_BOUNDARY.contains("无法修改"))
+        assertTrue("应说明彻底删除的数据可能重新出现", BACKUP_OLD_DATA_BOUNDARY.contains("彻底删除"))
+        assertTrue(BACKUP_OLD_DATA_BOUNDARY.contains("重新出现"))
+    }
+
     // ---------- 测试 helper：手工构造 ZDBK 文件与替身 ----------
 
     /** 手工加密负载用的 Json 实例（与 BackupUseCases 编码约定一致）。 */
@@ -763,6 +1158,10 @@ class BackupUseCasesTest {
         val tables: Map<String, JsonArray>,
         val aiSessionCount: Int = 0,
         val aiSessions: List<JsonElement> = emptyList(),
+        val advisorFeedbackCount: Int = 0,
+        val advisorAdoptionCount: Int = 0,
+        val advisorBindingCount: Int = 0,
+        val advisorRecords: AdvisorRecords = AdvisorRecords(),
     )
 
     /** 构造十表齐全的测试负载：[overrides] 按表覆盖行集合，其余为空。 */
