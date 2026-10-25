@@ -16,6 +16,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,13 +41,26 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        // T10/#11：用户可能刚在系统设置改动通知/精确提醒/省电限制，回前台时刷新状态与调度（幂等）
+        (application as ZhiDeerApplication).container.refreshReminderStatusOnResume()
+    }
 }
 
 /** T34/#35：五个底栏——首页、日历、便签、待办、小鹿。 */
 private enum class Tab(val label: String) { HOME("首页"), CALENDAR("日历"), NOTES("便签"), TASKS("待办"), DEER("小鹿") }
 
-/** 二级入口（从首页进入，返回回首页）：记忆、回收站、备份、设置。 */
-private enum class Secondary(val label: String) { MEMORY("记忆"), BIN("回收站"), BACKUP("备份"), SETTINGS("设置"), CLOCK("系统闹钟交接") }
+/** 二级入口（从首页进入，返回回首页）：记忆、回收站、备份、设置、提醒状态、系统闹钟交接。 */
+private enum class Secondary(val label: String) {
+    MEMORY("记忆"),
+    BIN("回收站"),
+    BACKUP("备份"),
+    SETTINGS("设置"),
+    REMINDERS("提醒状态"),
+    CLOCK("系统闹钟交接"),
+}
 
 @Composable
 private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
@@ -54,6 +68,9 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
     var secondary by remember { mutableStateOf<Secondary?>(null) }
     var pendingDetailTask by remember { mutableStateOf<com.zhideer.app.domain.model.TodoTask?>(null) }
     var pendingCreating by remember { mutableStateOf(false) }
+    // T10/#11：错过提醒合并提示（首页横幅），数据来自系统调度台账的真实错过记录
+    val missedReminders by container.reminderRestoreUseCases.observeOutstandingMissed()
+        .collectAsState(initial = emptyList())
 
     secondary?.let { page ->
         Column(Modifier.fillMaxSize()) {
@@ -69,6 +86,12 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     Secondary.SETTINGS -> com.zhideer.app.ui.SettingsScreen(
                         appVersion = "0.1.0",
                         onOpenClockHandoff = { secondary = Secondary.CLOCK },
+                        onOpenReminderStatus = { secondary = Secondary.REMINDERS },
+                    )
+                    Secondary.REMINDERS -> com.zhideer.app.ui.ReminderStatusScreen(
+                        useCases = container.reminderRestoreUseCases,
+                        fixLauncher = container.reminderFixLauncher,
+                        zoneId = container.zoneId,
                     )
                     Secondary.CLOCK -> com.zhideer.app.ui.ClockHandoffScreen(
                         useCases = container.clockHandoffUseCases,
@@ -108,6 +131,8 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     onOpenBin = { secondary = Secondary.BIN },
                     onOpenBackup = { secondary = Secondary.BACKUP },
                     onOpenSettings = { secondary = Secondary.SETTINGS },
+                    missedReminderCount = missedReminders.size,
+                    onOpenReminders = { secondary = Secondary.REMINDERS },
                     onOpenTaskDetail = { task ->
                         pendingDetailTask = task
                         tab = Tab.TASKS
