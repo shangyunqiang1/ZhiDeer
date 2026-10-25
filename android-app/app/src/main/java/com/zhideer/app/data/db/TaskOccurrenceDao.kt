@@ -18,4 +18,8 @@ interface TaskOccurrenceDao {
 
     @Upsert
     suspend fun upsert(occurrence: TaskOccurrenceEntity)
+
+    /** 彻底删除待办联动（T16/#17）：物理删除其全部出现完成记录（回收站期间保留历史不动）。 */
+    @Query("DELETE FROM task_occurrences WHERE taskId = :taskId")
+    suspend fun deleteByTask(taskId: String)
 }

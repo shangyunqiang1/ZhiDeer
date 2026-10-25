@@ -29,6 +29,7 @@ import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
+import com.zhideer.app.domain.usecase.RecycleBinUseCases
 import com.zhideer.app.domain.usecase.RecurrenceUseCases
 import com.zhideer.app.domain.usecase.ReminderUseCases
 import com.zhideer.app.domain.usecase.SubTaskUseCases
@@ -38,7 +39,10 @@ import com.zhideer.app.platform.AlarmScheduler
 import com.zhideer.app.platform.AndroidNotificationPoster
 import com.zhideer.app.platform.NotificationPoster
 import com.zhideer.app.platform.PlatformAlarmScheduler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.time.ZoneId
 import java.util.UUID
@@ -175,6 +179,35 @@ class AppContainer(
         calendarRepository = calendarRepository,
         now = nowMillis,
     )
+
+    // —— T16/#17 回收站：纯新增装配 ——
+    // 统一回收站入口：查看、恢复、彻底删除与三十天到期清理（GLOSSARY：回收站）。
+    // 恢复策略：父子整体恢复；已解除的日程关联默认不自动重连（恢复结果明确提示）；
+    // 提醒不复活，错过的提醒只提示不补响。彻底删除级联清理从属数据。
+    val recycleBinUseCases: RecycleBinUseCases = RecycleBinUseCases(
+        tasksRepository = tasksRepository,
+        subTasksRepository = subTasksRepository,
+        calendarRepository = calendarRepository,
+        notesRepository = notesRepository,
+        taskOccurrenceRepository = taskOccurrenceRepository,
+        reminderUseCases = reminderUseCases,
+        calendarReminderUseCases = calendarReminderUseCases,
+        taskScheduleLinkUseCases = taskScheduleLinkUseCases,
+        now = nowMillis,
+    )
+
+    // 三十天到期清理的启动懒执行调度（T16/#17）：应用启动时触发一次，
+    // 不引入 WorkManager 依赖；测试可注入固定时钟（purgeExpired 接受 cutoff）。
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 应用启动时调用：清理 trashedAt 早于当前时刻减三十天的全部回收站记录。幂等。 */
+    fun purgeExpiredOnStartup() {
+        cleanupScope.launch {
+            runCatching {
+                recycleBinUseCases.purgeExpired(nowMillis() - RecycleBinUseCases.RETENTION_MILLIS)
+            }
+        }
+    }
 
     // —— AI 对话（T17/#18）：纯新增装配，不改动既有依赖 ——
     // API Key 存本机加密存储（EncryptedSharedPreferences，主密钥 AndroidKeystore）；

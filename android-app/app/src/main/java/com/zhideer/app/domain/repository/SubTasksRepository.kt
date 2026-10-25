@@ -30,4 +30,16 @@ interface SubTasksRepository {
 
     /** 该父待办下未删除子任务的最大排序值，无记录时返回 -1。 */
     suspend fun maxSortOrder(parentId: String): Int
+
+    /** 回收站观察（T16/#17 纯新增）：仅回收站子任务，按删除时间倒序。 */
+    fun observeTrashedSubTasks(): Flow<List<SubTask>>
+
+    /** 回收站一次性读取（T16/#17 纯新增）：供到期清理批量判定。 */
+    suspend fun listTrashedSubTasks(): List<SubTask>
+
+    /** 彻底删除单个子任务（T16/#17 纯新增）：物理删除该行。 */
+    suspend fun purge(id: String)
+
+    /** 彻底删除待办联动（T16/#17 纯新增）：物理删除其全部子任务（含回收站记录）。 */
+    suspend fun purgeByParent(parentId: String)
 }

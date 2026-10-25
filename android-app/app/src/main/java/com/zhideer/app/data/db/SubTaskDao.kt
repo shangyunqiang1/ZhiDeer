@@ -26,6 +26,14 @@ interface SubTaskDao {
     @Query("SELECT * FROM sub_tasks WHERE id = :id")
     suspend fun get(id: String): SubTaskEntity?
 
+    /** 回收站观察（T16/#17）：仅回收站子任务，供回收站界面与到期清理使用。 */
+    @Query("SELECT * FROM sub_tasks WHERE trashedAt IS NOT NULL ORDER BY trashedAt DESC, id ASC")
+    fun observeTrashed(): Flow<List<SubTaskEntity>>
+
+    /** 回收站一次性读取（T16/#17）：供到期清理批量判定。 */
+    @Query("SELECT * FROM sub_tasks WHERE trashedAt IS NOT NULL")
+    suspend fun listTrashed(): List<SubTaskEntity>
+
     @Upsert
     suspend fun upsert(subTask: SubTaskEntity)
 
@@ -49,4 +57,12 @@ interface SubTaskDao {
     /** 该父待办下未删除子任务的最大排序值；无记录时返回 null。 */
     @Query("SELECT MAX(sortOrder) FROM sub_tasks WHERE parentId = :parentId AND trashedAt IS NULL")
     suspend fun maxSortOrder(parentId: String): Int?
+
+    /** 彻底删除单个子任务（T16/#17）：物理删除该行。 */
+    @Query("DELETE FROM sub_tasks WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    /** 彻底删除待办联动（T16/#17）：物理删除其全部子任务（含回收站记录）。 */
+    @Query("DELETE FROM sub_tasks WHERE parentId = :parentId")
+    suspend fun deleteByParent(parentId: String)
 }

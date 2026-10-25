@@ -50,4 +50,21 @@ class SubTasksRepositoryImpl(
     override suspend fun maxSortOrder(parentId: String): Int = withContext(ioDispatcher) {
         subTaskDao.maxSortOrder(parentId) ?: -1
     }
+
+    override fun observeTrashedSubTasks(): Flow<List<SubTask>> =
+        subTaskDao.observeTrashed()
+            .map { list -> list.map { it.toModel() } }
+            .flowOn(ioDispatcher)
+
+    override suspend fun listTrashedSubTasks(): List<SubTask> = withContext(ioDispatcher) {
+        subTaskDao.listTrashed().map { it.toModel() }
+    }
+
+    override suspend fun purge(id: String) = withContext(ioDispatcher) {
+        subTaskDao.deleteById(id)
+    }
+
+    override suspend fun purgeByParent(parentId: String) = withContext(ioDispatcher) {
+        subTaskDao.deleteByParent(parentId)
+    }
 }
