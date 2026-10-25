@@ -4,8 +4,11 @@ import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.zhideer.app.data.db.ZhiDeerDatabase
+import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
+import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.TasksRepository
+import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
 import kotlinx.coroutines.Dispatchers
 import java.time.ZoneId
@@ -28,6 +31,9 @@ class AppContainer(
     )
         .setDriver(BundledSQLiteDriver())
         .setQueryCoroutineContext(Dispatchers.IO)
+        // T05/#6：数据库 1→2 新增便签表。当前应用尚无真实用户数据，先采用破坏性迁移兜底，
+        // 避免老版本库升级时崩溃；接入真实用户数据前必须替换为保留数据的正式迁移。
+        .fallbackToDestructiveMigration()
         .build()
 
     private val ioDispatcher: CoroutineContext = Dispatchers.IO
@@ -39,5 +45,13 @@ class AppContainer(
         idGen = { UUID.randomUUID().toString() },
         now = nowMillis,
         zoneId = zoneId.id,
+    )
+
+    val notesRepository: NotesRepository = NotesRepositoryImpl(database.noteDao(), Dispatchers.IO)
+
+    val noteUseCases: NoteUseCases = NoteUseCases(
+        repository = notesRepository,
+        idGen = { UUID.randomUUID().toString() },
+        now = nowMillis,
     )
 }
