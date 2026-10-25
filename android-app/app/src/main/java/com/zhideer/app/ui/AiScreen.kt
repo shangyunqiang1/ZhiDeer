@@ -42,17 +42,23 @@ import androidx.compose.ui.unit.dp
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
 import com.zhideer.app.domain.model.AiProposal
+import com.zhideer.app.domain.model.AiProposalDeleteAction
 import com.zhideer.app.domain.model.AiProposalItem
 import com.zhideer.app.domain.model.AiProposalKind
+import com.zhideer.app.domain.model.AiProposalOp
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalStatus
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiConfigInput
 import com.zhideer.app.domain.usecase.AiContextCategory
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.kindCn
+import com.zhideer.app.domain.usecase.proposalChangePreviewLines
+import com.zhideer.app.domain.usecase.proposalDeleteActionText
 import com.zhideer.app.domain.usecase.proposalDueText
 import com.zhideer.app.domain.usecase.proposalReminderText
 import com.zhideer.app.domain.usecase.proposalScheduleRangeText
+import com.zhideer.app.domain.usecase.proposalTargetSummary
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -61,17 +67,20 @@ import java.time.format.DateTimeFormatter
 private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
 /**
- * AI 助手主界面（T17/#18、T18/#19、T19/#20、T20/#21），公开供根导航挂载：
+ * AI 助手主界面（T17/#18、T18/#19、T19/#20、T20/#21、T21/#22），公开供根导航挂载：
  * - 会话列表 + 新建会话 + 重开 + 删除；
  * - 聊天视图：多轮流式回复、发送/停止、生成中可取消；
- * - 创建模式（#20/#21）：开启后发送走提案路径——AI 起草待办/便签/日程操作提案，
- *   提案以卡片呈现在对话流中（完整字段预览 + 「确认创建」「忽略」与逐项「移除」），
- *   日程卡片显示按创建时区换算的时间范围（跨日明确显示）、地点/分类/备注与提醒摘要（无提醒明确标注），
- *   确认前绝不写入业务数据，确认后回执含已创建记录标识写回对话；
+ * - 创建模式（#20/#21/#22）：开启后发送走提案路径——AI 起草待办/便签/日程的新增、修改与删除操作提案，
+ *   提案以卡片呈现在对话流中（完整字段预览 + 「确认创建/确认执行」「忽略」与逐项「移除」），
+ *   日程卡片显示按创建时区换算的时间范围（跨日明确显示）、地点/分类/备注与提醒摘要（无提醒明确标注）；
+ *   修改条目逐字段展示「旧值 → 新值」并显示选定目标快照；删除条目明确取消/删除语义
+ *   （GLOSSARY：取消待办保留记录并停止提醒，不是删除）；修改/删除需读取本地数据定位目标，
+ *   未授权对应类别时提示先授权；多候选时列出候选供点选（点选哪条就是哪条，未点选不可确认），
+ *   匹配不到时由 AI 追问；确认前绝不写入业务数据，确认后回执含记录标识写回对话；
  * - 授权面板（#19）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签），
  *   各类别独立勾选、整体确认授权、可随时撤销；对话页显示"已授权范围"徽标；
  *   已授权时普通发送走 [AiChatUseCases.sendWithAuthorizedContext]，未授权回退普通发送（不含本地数据）；
- *   创建提案只写不读，不需要授权（#20）；
+ *   新增提案只写不读，不需要授权（#20）；修改/删除提案的目标定位需要对应类别授权（#22）；
  * - 配置对话框：API Key（掩码输入、可切换显示）、模型标识、Base URL、「测试连接」。
  * 全部文案为中文；错误提示来自用例层（已是中文可诊断文案）。
  */
@@ -164,7 +173,8 @@ fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
                         scope.launch {
                             // 新会话传 null，由用例创建；既有会话传 id
                             val id = chatSessionId?.takeIf { it.isNotEmpty() }
-                            // #20：创建模式走提案路径（只写不读，不需要授权）；
+                            // #20/#22：创建模式走提案路径——新增提案只写不读不需要授权；
+                            // 修改/删除提案的目标定位需读取本地数据，未授权对应类别时由用例层提示先授权
                             // #19：普通模式已授权时发送携带真实记录快照，未授权回退普通发送
                             val result: Result<*> = if (createMode) {
                                 proposalUseCases.sendAndIngest(id, text) { delta -> streamingText += delta }
@@ -231,6 +241,13 @@ fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
                 onRemoveProposalItem = { proposalId, itemId ->
                     scope.launch {
                         proposalUseCases.removeProposalItem(proposalId, itemId)
+                            .onFailure { e -> error = e.message }
+                    }
+                },
+                // T21/#22：多候选修改/删除条目的目标点选（点选哪条就是哪条，绝不静默猜测）
+                onSelectProposalTarget = { proposalId, itemId, recordId ->
+                    scope.launch {
+                        proposalUseCases.selectProposalTarget(proposalId, itemId, recordId)
                             .onFailure { e -> error = e.message }
                     }
                 },
@@ -322,6 +339,7 @@ private fun ChatView(
     onConfirmProposal: (String) -> Unit,
     onDismissProposal: (String) -> Unit,
     onRemoveProposalItem: (String, String) -> Unit,
+    onSelectProposalTarget: (String, String, String) -> Unit,
     modifier: Modifier = Modifier,
     error: String?,
 ) {
@@ -351,6 +369,9 @@ private fun ChatView(
                     onConfirm = { onConfirmProposal(proposal.id) },
                     onDismiss = { onDismissProposal(proposal.id) },
                     onRemoveItem = { itemId -> onRemoveProposalItem(proposal.id, itemId) },
+                    onSelectTarget = { itemId, recordId ->
+                        onSelectProposalTarget(proposal.id, itemId, recordId)
+                    },
                 )
             }
             if (generating && streamingText != null) {
@@ -362,14 +383,14 @@ private fun ChatView(
                 }
             }
         }
-        // #20/#21：创建模式开关——开启后 AI 把一句话起草为待办/便签/日程操作提案，确认后才创建
+        // #20/#21/#22：创建模式开关——开启后 AI 把一句话起草为新增/修改/删除操作提案，确认后才执行
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
         ) {
             Checkbox(checked = createMode, onCheckedChange = onCreateModeChange)
             Text(
-                "创建模式：让 AI 起草待办/便签/日程提案（确认后才会创建）",
+                "创建模式：让 AI 起草新增/修改/删除提案（修改与删除需授权对应类别，确认后才会执行）",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -661,9 +682,11 @@ private fun AiContextPanel(
 }
 
 /**
- * 操作提案卡片（#20/#21）：完整字段预览（截止/日程时间按创建时区换算的可读时间，跨日明确显示）+
- * 状态标记 +「确认创建」「忽略」按钮与逐项「移除」。PENDING 才有操作按钮；
- * EXECUTED 显示含已创建记录标识的中文回执；CONFIRMED 显示结果待核实；EXPIRED 不残留可执行操作。
+ * 操作提案卡片（#20/#21，#22 扩展修改与删除）：完整字段预览（截止/日程时间按创建时区换算的可读时间，
+ * 跨日明确显示）+ 状态标记 +「确认创建/确认执行」「忽略」按钮与逐项「移除」。PENDING 才有操作按钮；
+ * 修改条目逐字段展示「旧值 → 新值」，删除条目明确取消/删除语义（GLOSSARY：取消待办≠删除）；
+ * 多候选修改/删除条目列出候选供点选（点选哪条就是哪条，未点选不可确认）；EXECUTED 显示含记录标识的
+ * 中文回执；CONFIRMED 显示结果待核实；EXPIRED 不残留可执行操作。
  */
 @Composable
 private fun ProposalCard(
@@ -673,7 +696,11 @@ private fun ProposalCard(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     onRemoveItem: (String) -> Unit,
+    onSelectTarget: (itemId: String, recordId: String) -> Unit,
 ) {
+    // T21/#22：含修改/删除条目时按钮文案与语义不同；有条目未点选目标时禁止确认（用例层同样拦截）
+    val hasModifyDelete = proposal.items.any { it.op != AiProposalOp.CREATE }
+    val pendingSelection = proposal.items.any { it.op != AiProposalOp.CREATE && it.targetRecordId == null }
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = MaterialTheme.shapes.medium,
@@ -699,6 +726,7 @@ private fun ProposalCard(
                     zoneId = zoneId,
                     removable = proposal.status == AiProposalStatus.PENDING && !busy,
                     onRemove = { onRemoveItem(item.id) },
+                    onSelectTarget = { recordId -> onSelectTarget(item.id, recordId) },
                 )
             }
             proposal.resultMessage?.let { receipt ->
@@ -710,9 +738,23 @@ private fun ProposalCard(
                 )
             }
             if (proposal.status == AiProposalStatus.PENDING) {
+                if (pendingSelection) {
+                    Text(
+                        "还有条目未点选目标记录：请先在上方候选中点选，再确认执行。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 Row(modifier = Modifier.padding(top = 8.dp)) {
-                    Button(onClick = onConfirm, enabled = !busy) {
-                        Text(if (busy) "创建中…" else "确认创建")
+                    Button(onClick = onConfirm, enabled = !busy && !pendingSelection) {
+                        Text(
+                            when {
+                                busy -> if (hasModifyDelete) "执行中…" else "创建中…"
+                                hasModifyDelete -> "确认执行"
+                                else -> "确认创建"
+                            },
+                        )
                     }
                     OutlinedButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.padding(start = 8.dp)) {
                         Text("忽略")
@@ -723,27 +765,39 @@ private fun ProposalCard(
     }
 }
 
-/** 提案条目字段预览：待办（截止/优先级/分类/备注）、便签（正文/标签/清单项）或日程（时间/地点/分类/备注/提醒），保留原话不改写。 */
+/** 提案条目标签（#22）：按操作类型与目标类型区分，取消待办明确标注「取消」而非删除。 */
+private fun proposalItemLabel(item: AiProposalItem): String = when (item.op) {
+    AiProposalOp.CREATE -> "[${kindCn(item.kind)}]"
+    AiProposalOp.MODIFY -> "[修改${kindCn(item.kind)}]"
+    AiProposalOp.DELETE -> when {
+        item.kind == AiProposalKind.TASK && item.deleteAction == AiProposalDeleteAction.CANCEL -> "[取消待办]"
+        else -> "[删除${kindCn(item.kind)}]"
+    }
+}
+
+/**
+ * 提案条目字段预览（#22 扩展）：
+ * - 新增：待办（截止/优先级/分类/备注）、便签（正文/标签/清单项）或日程（时间/地点/分类/备注/提醒），保留原话不改写；
+ * - 修改：目标快照 + 逐字段「旧值 → 新值」；多候选未点选时列出候选按钮（点选哪条就是哪条）；
+ * - 删除：目标快照 + 取消/删除语义说明（GLOSSARY：取消待办保留记录并停止提醒，不是删除）。
+ */
 @Composable
 private fun ProposalItemRow(
     item: AiProposalItem,
     zoneId: ZoneId,
     removable: Boolean,
     onRemove: () -> Unit,
+    onSelectTarget: (recordId: String) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                when (item.kind) {
-                    AiProposalKind.TASK -> "[待办]"
-                    AiProposalKind.NOTE -> "[便签]"
-                    AiProposalKind.SCHEDULE -> "[日程]"
-                },
+                proposalItemLabel(item),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
             Text(
-                item.title,
+                item.targetRecord?.title ?: item.title,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                 modifier = Modifier.weight(1f).padding(start = 4.dp),
@@ -752,28 +806,64 @@ private fun ProposalItemRow(
                 TextButton(onClick = onRemove) { Text("移除") }
             }
         }
+        // T21/#22：目标定位展示——唯一候选/已点选显示选定目标；多候选未点选列出候选供点选
+        if (item.op != AiProposalOp.CREATE) {
+            val target = item.targetRecord
+            if (target != null) {
+                Text(
+                    "已选定目标：" + proposalTargetSummary(target, zoneId),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            } else if (item.candidates.size > 1) {
+                Text(
+                    "找到 ${item.candidates.size} 条匹配记录，请点选要操作的目标：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                item.candidates.forEach { candidate ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            "${candidate.title}（${proposalTargetSummary(candidate, zoneId)}）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { onSelectTarget(candidate.recordId) }) { Text("选它") }
+                    }
+                }
+            }
+        }
         val details = buildList {
-            when (item.kind) {
-                AiProposalKind.TASK -> {
-                    proposalDueText(item, zoneId)?.let { add("截止：$it") }
-                    add("优先级：${priorityCn(item.priority)}")
-                    if (item.category.isNotBlank()) add("分类：${item.category}")
-                    if (item.note.isNotBlank()) add("备注：${item.note}")
+            when (item.op) {
+                AiProposalOp.CREATE -> when (item.kind) {
+                    AiProposalKind.TASK -> {
+                        proposalDueText(item, zoneId)?.let { add("截止：$it") }
+                        add("优先级：${priorityCn(item.priority)}")
+                        if (item.category.isNotBlank()) add("分类：${item.category}")
+                        if (item.note.isNotBlank()) add("备注：${item.note}")
+                    }
+                    AiProposalKind.NOTE -> {
+                        if (item.content.isNotBlank()) add("正文：${item.content}")
+                        if (item.tags.isNotEmpty()) add("标签：${item.tags.joinToString("、")}")
+                        item.items.forEachIndexed { index, text -> add("清单${index + 1}：$text") }
+                    }
+                    // T20/#21 日程：时间按创建时区换算可读（跨日明确显示），提醒显式给出无提醒状态
+                    AiProposalKind.SCHEDULE -> {
+                        proposalScheduleRangeText(item, zoneId)?.let { add("时间：$it") }
+                        add("时区：${zoneId.id}")
+                        if (item.location.isNotBlank()) add("地点：${item.location}")
+                        if (item.category.isNotBlank()) add("分类：${item.category}")
+                        if (item.note.isNotBlank()) add("备注：${item.note}")
+                        add("提醒：" + (proposalReminderText(item, zoneId) ?: "无"))
+                    }
                 }
-                AiProposalKind.NOTE -> {
-                    if (item.content.isNotBlank()) add("正文：${item.content}")
-                    if (item.tags.isNotEmpty()) add("标签：${item.tags.joinToString("、")}")
-                    item.items.forEachIndexed { index, text -> add("清单${index + 1}：$text") }
-                }
-                // T20/#21 日程：时间按创建时区换算可读（跨日明确显示），提醒显式给出无提醒状态
-                AiProposalKind.SCHEDULE -> {
-                    proposalScheduleRangeText(item, zoneId)?.let { add("时间：$it") }
-                    add("时区：${zoneId.id}")
-                    if (item.location.isNotBlank()) add("地点：${item.location}")
-                    if (item.category.isNotBlank()) add("分类：${item.category}")
-                    if (item.note.isNotBlank()) add("备注：${item.note}")
-                    add("提醒：" + (proposalReminderText(item, zoneId) ?: "无"))
-                }
+                // T21/#22：修改逐字段「旧值 → 新值」；删除明确取消/删除语义与去向
+                AiProposalOp.MODIFY -> addAll(proposalChangePreviewLines(item, zoneId))
+                AiProposalOp.DELETE -> add(proposalDeleteActionText(item))
             }
         }
         details.forEach { line ->

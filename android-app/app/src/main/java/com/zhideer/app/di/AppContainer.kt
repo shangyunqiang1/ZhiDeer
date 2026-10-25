@@ -31,6 +31,7 @@ import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
+import com.zhideer.app.domain.usecase.AiProposalTargetMatcher
 import com.zhideer.app.domain.usecase.AiProposalUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
@@ -287,6 +288,17 @@ class AppContainer(
         AiProposalStore(File(context.filesDir, "ai_proposals.preferences_pb"))
     }
 
+    // —— T21/#22 修改/删除提案的目标定位：纯新增装配 ——
+    // 按定位线索从真实仓库只读匹配目标记录（排除回收站）；授权门在 AiProposalUseCases
+    // （复用 #19 的 AiContextAuthorizer），未授权对应类别绝不读取任何仓库。
+    val aiProposalTargetMatcher: AiProposalTargetMatcher by lazy {
+        AiProposalTargetMatcher(
+            tasksRepository = tasksRepository,
+            notesRepository = notesRepository,
+            calendarRepository = calendarRepository,
+        )
+    }
+
     val aiProposalUseCases: AiProposalUseCases by lazy {
         AiProposalUseCases(
             chat = aiChatUseCases,
@@ -296,6 +308,8 @@ class AppContainer(
             // T20/#21 纯新增：日程提案确认后经日程与日程提醒真实入口创建
             calendarUseCases = calendarUseCases,
             calendarReminderUseCases = calendarReminderUseCases,
+            // T21/#22 纯新增：修改/删除提案的目标定位
+            targetMatcher = aiProposalTargetMatcher,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,
