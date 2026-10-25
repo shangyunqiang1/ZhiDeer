@@ -25,6 +25,10 @@ class CalendarRemindersRepositoryImpl(
         calendarReminderDao.listByEntry(entryId).map { it.toModel() }
     }
 
+    override suspend fun listAll(): List<Reminder> = withContext(ioDispatcher) {
+        calendarReminderDao.listAll().map { it.toModel() }
+    }
+
     override suspend fun get(id: String): Reminder? = withContext(ioDispatcher) {
         calendarReminderDao.get(id)?.toModel()
     }

@@ -733,9 +733,9 @@ class MemoryUseCasesTest {
 private class MemoryFakeAlarmScheduler : AlarmScheduler {
     override fun canScheduleExact(): Boolean = true
 
-    override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
+    override suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
 
-    override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
+    override suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
 
-    override fun cancel(reminderId: String) = Unit
+    override suspend fun cancel(reminderId: String) = Unit
 }

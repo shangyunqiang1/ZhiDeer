@@ -10,12 +10,12 @@ interface AlarmScheduler {
     /** 是否可设置精确闹钟（API < 31 恒为可；API 31+ 取决于系统授权）。 */
     fun canScheduleExact(): Boolean
 
-    /** 设置精确闹钟；返回调度请求是否提交成功。 */
-    fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean
+    /** 设置精确闹钟；返回调度请求是否提交成功。suspend：生产装饰器需同步写“已调度”台账。 */
+    suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean
 
     /** 显式确认降级后的非精确调度（可能延迟触发）。 */
-    fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean
+    suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean
 
     /** 取消提醒的闹钟；未设置过时为无操作。 */
-    fun cancel(reminderId: String)
+    suspend fun cancel(reminderId: String)
 }

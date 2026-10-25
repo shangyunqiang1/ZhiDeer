@@ -631,6 +631,7 @@ class AdvisorUseCasesTest {
             flowOf(emptyList())
 
         override suspend fun listByEntry(entryId: String): List<com.zhideer.app.domain.model.Reminder> = emptyList()
+        override suspend fun listAll(): List<com.zhideer.app.domain.model.Reminder> = emptyList()
         override suspend fun get(id: String): com.zhideer.app.domain.model.Reminder? = null
         override suspend fun upsert(reminder: com.zhideer.app.domain.model.Reminder) =
             throw UnsupportedOperationException("本测试不应写提醒")
@@ -641,12 +642,12 @@ class AdvisorUseCasesTest {
 
     private class NoopAlarmScheduler : com.zhideer.app.platform.AlarmScheduler {
         override fun canScheduleExact(): Boolean = false
-        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
+        override suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
             throw UnsupportedOperationException("本测试不应调度提醒")
 
-        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
+        override suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
             throw UnsupportedOperationException("本测试不应调度提醒")
 
-        override fun cancel(reminderId: String) = throw UnsupportedOperationException("本测试不应取消提醒")
+        override suspend fun cancel(reminderId: String) = throw UnsupportedOperationException("本测试不应取消提醒")
     }
 }

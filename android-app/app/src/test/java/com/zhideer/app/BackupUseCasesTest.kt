@@ -741,15 +741,15 @@ class BackupUseCasesTest {
         val scheduled = mutableListOf<String>()
         val cancelled = mutableListOf<String>()
         override fun canScheduleExact(): Boolean = true
-        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+        override suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
             scheduled += reminderId
             return true
         }
-        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+        override suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
             scheduled += reminderId
             return true
         }
-        override fun cancel(reminderId: String) {
+        override suspend fun cancel(reminderId: String) {
             cancelled += reminderId
         }
     }

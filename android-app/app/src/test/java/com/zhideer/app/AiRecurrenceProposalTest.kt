@@ -680,8 +680,8 @@ class AiRecurrenceProposalTest {
 
     private class FakeAlarmScheduler : AlarmScheduler {
         override fun canScheduleExact(): Boolean = true
-        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
-        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
-        override fun cancel(reminderId: String) = Unit
+        override suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
+        override suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean = true
+        override suspend fun cancel(reminderId: String) = Unit
     }
 }
