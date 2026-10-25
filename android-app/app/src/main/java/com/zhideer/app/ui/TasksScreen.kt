@@ -68,6 +68,8 @@ fun TasksScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var completeCandidate by remember { mutableStateOf<TodoTask?>(null) }
     var candidateFuture by remember { mutableStateOf(emptyList<com.zhideer.app.domain.model.CalendarEntry>()) }
+    var cancelCandidate by remember { mutableStateOf<TodoTask?>(null) }
+    var cancelFuture by remember { mutableStateOf(emptyList<com.zhideer.app.domain.model.CalendarEntry>()) }
 
     val tasks by remember(filter) {
         useCases.observe(filter)
@@ -185,8 +187,14 @@ fun TasksScreen(
             },
             onCancelTask = {
                 scope.launch {
-                    useCases.cancel(task.id).onSuccess { viewing = null; error = null }
-                        .onFailure { error = it.message }
+                    val future = linkUseCases.futureEntriesForTask(task.id)
+                    if (future.isNotEmpty()) {
+                        cancelCandidate = task
+                        cancelFuture = future
+                    } else {
+                        useCases.cancel(task.id).onSuccess { viewing = null; error = null }
+                            .onFailure { error = it.message }
+                    }
                 }
             },
             onTrash = {
@@ -216,6 +224,31 @@ fun TasksScreen(
                     completeCandidate = null
                 }
             },
+        )
+    }
+
+    cancelCandidate?.let { candidate ->
+        CompleteTaskFutureSchedulesDialog(
+            task = candidate,
+            futureEntries = cancelFuture,
+            onDismiss = { cancelCandidate = null },
+            onKeep = {
+                scope.launch {
+                    useCases.cancel(candidate.id).onSuccess { viewing = null; error = null }
+                        .onFailure { error = it.message }
+                    cancelCandidate = null
+                }
+            },
+            onCancelSchedules = {
+                scope.launch {
+                    useCases.cancel(candidate.id).onSuccess { viewing = null; error = null }
+                        .onFailure { error = it.message }
+                    linkUseCases.cancelFutureEntries(candidate.id)
+                    cancelCandidate = null
+                }
+            },
+            title = "待办已取消，关联日程如何处理？",
+            leadText = "「${candidate.title}」将取消（保留记录并停止提醒）。它还有 ${cancelFuture.size} 个尚未开始的关联日程：",
         )
     }
 }
