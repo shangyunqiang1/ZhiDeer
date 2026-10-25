@@ -8,14 +8,17 @@ import com.zhideer.app.data.repository.CalendarRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.RemindersRepositoryImpl
 import com.zhideer.app.data.repository.SubTasksRepositoryImpl
+import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
 import com.zhideer.app.data.repository.TasksRepositoryImpl
 import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.RemindersRepository
 import com.zhideer.app.domain.repository.SubTasksRepository
+import com.zhideer.app.domain.repository.TaskOccurrenceRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
+import com.zhideer.app.domain.usecase.RecurrenceUseCases
 import com.zhideer.app.domain.usecase.ReminderUseCases
 import com.zhideer.app.domain.usecase.SubTaskUseCases
 import com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases
@@ -81,6 +84,19 @@ class AppContainer(
         now = nowMillis,
     )
 
+    // T12/#13 纯新增：重复出现完成记录仓库先于待办用例组装，
+    // 供列表过滤合成“下一次未完成出现”与完成转发使用。
+    val taskOccurrenceRepository: TaskOccurrenceRepository = TaskOccurrenceRepositoryImpl(
+        database.taskOccurrenceDao(),
+        Dispatchers.IO,
+    )
+
+    val recurrenceUseCases: RecurrenceUseCases = RecurrenceUseCases(
+        tasksRepository = tasksRepository,
+        occurrenceRepository = taskOccurrenceRepository,
+        now = nowMillis,
+    )
+
     val taskUseCases: TaskUseCases = TaskUseCases(
         repository = tasksRepository,
         idGen = { UUID.randomUUID().toString() },
@@ -96,6 +112,8 @@ class AppContainer(
         onDueChanged = { taskId -> reminderUseCases.rescheduleForDueChange(taskId) },
         // #9：取消待办同时停止该待办自身的提醒（GLOSSARY）
         onCancelled = { taskId -> reminderUseCases.cancelReminders(taskId) },
+        // #13：重复待办的列表过滤与完成走出现维度（每一次分别记录完成）
+        occurrenceRepository = taskOccurrenceRepository,
     )
 
     val calendarRepository: CalendarRepository = CalendarRepositoryImpl(database.calendarEntryDao(), Dispatchers.IO)

@@ -1,12 +1,16 @@
 package com.zhideer.app.domain.usecase
 
+import com.zhideer.app.domain.model.RecurrenceRule
 import com.zhideer.app.domain.model.TaskDue
 import com.zhideer.app.domain.model.TaskFilter
+import com.zhideer.app.domain.model.TaskOccurrence
 import com.zhideer.app.domain.model.TaskPriority
 import com.zhideer.app.domain.model.TaskStatus
 import com.zhideer.app.domain.model.TodoTask
+import com.zhideer.app.domain.repository.TaskOccurrenceRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 
 /** 待办编辑输入；截止两种形态互斥。 */
@@ -18,6 +22,9 @@ data class TaskInput(
     val dueEpochDay: Long? = null,
     val dueAtMillis: Long? = null,
     val dueZoneId: String,
+    // T12/#13 纯新增：重复规则（可空 = 普通待办）。GLOSSARY：重复待办按固定日期规则
+    // 反复出现，每一次分别记录完成；不采用“完成后再重复推进同一记录”的模式。
+    val recurrenceRule: RecurrenceRule? = null,
 )
 
 /**
@@ -41,6 +48,9 @@ class TaskUseCases(
     // T08/#9 纯新增：待办取消成功后的提醒停止钩子，默认无操作
     // （GLOSSARY：取消待办同时停止该待办自身的提醒）。不改既有语义。
     private val onCancelled: suspend (taskId: String) -> Unit = {},
+    // T12/#13 纯新增：重复出现完成记录仓库（可空 = 不启用重复能力）。
+    // 供列表过滤合成“下一次未完成出现”状态，以及把整体完成转发为单次出现完成。
+    private val occurrenceRepository: TaskOccurrenceRepository? = null,
 ) {
 
     suspend fun create(input: TaskInput): Result<TodoTask> {
@@ -56,6 +66,7 @@ class TaskUseCases(
             dueEpochDay = input.dueEpochDay,
             dueAtMillis = input.dueAtMillis,
             dueZoneId = input.dueZoneId,
+            recurrenceRule = input.recurrenceRule,
             status = TaskStatus.ACTIVE,
             createdAt = t,
             updatedAt = t,
@@ -76,6 +87,7 @@ class TaskUseCases(
             category = input.category.trim(),
             dueEpochDay = input.dueEpochDay,
             dueAtMillis = input.dueAtMillis,
+            recurrenceRule = input.recurrenceRule,
             updatedAt = now(),
         )
         repository.upsertTask(updated)
@@ -83,10 +95,19 @@ class TaskUseCases(
         return Result.success(updated)
     }
 
-    /** 完成或撤销完成；完成记录时间戳，不改变其他状态。 */
+    /**
+     * 完成或撤销完成；完成记录时间戳，不改变其他状态。
+     * T12/#13 纯新增重复分支：重复待办的完成作用于“下一次未完成出现”
+     * （最早一次未完成，可为错过的过去出现），整体状态保持进行中（GLOSSARY：
+     * 每一次出现分别记录完成）；撤销完成撤销最近一次已完成的出现。
+     */
     suspend fun complete(id: String, completed: Boolean): Result<TodoTask> {
         val current = repository.getTask(id)
             ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
+        val occurrenceRepo = occurrenceRepository
+        if (current.recurrenceRule != null && occurrenceRepo != null) {
+            return completeRecurringOccurrence(current, occurrenceRepo, completed)
+        }
         val t = now()
         val updated = current.copy(
             status = if (completed) TaskStatus.COMPLETED else TaskStatus.ACTIVE,
@@ -144,14 +165,75 @@ class TaskUseCases(
 
     suspend fun get(id: String): TodoTask? = repository.getTask(id)
 
-    fun observe(filter: TaskFilter): Flow<List<TodoTask>> =
-        repository.observeTasks().map { tasks ->
-            tasks.filter { TaskDue.matches(it, filter, now()) }
+    /**
+     * 过滤查询。T12/#13 纯新增重复分支：重复待办依据重复规则与各次完成记录
+     * 合成“下一次未完成出现”状态后判定（错过不自动完成、不静默消失）；
+     * 非重复待办判定与既有行为完全一致。
+     */
+    fun observe(filter: TaskFilter): Flow<List<TodoTask>> {
+        val occurrenceRepo = occurrenceRepository
+            ?: return repository.observeTasks().map { tasks ->
+                tasks.filter { TaskDue.matches(it, filter, now()) }
+            }
+        return combine(repository.observeTasks(), occurrenceRepo.observeAll()) { tasks, occurrences ->
+            val completedDaysByTask = occurrences.filter { it.completed }
+                .groupBy { it.taskId }
+                .mapValues { (_, rows) -> rows.map { it.occurrenceEpochDay }.toSet() }
+            tasks.filter { task ->
+                val recurring = RecurrenceUseCases.recurringState(
+                    task,
+                    completedDaysByTask[task.id] ?: emptySet(),
+                    now(),
+                )
+                TaskDue.matches(task, filter, now(), recurring)
+            }
         }
+    }
+
+    /** 重复待办的完成/撤销转发到出现维度：完成代表次（下一次未完成出现）。 */
+    private suspend fun completeRecurringOccurrence(
+        task: TodoTask,
+        occurrenceRepo: TaskOccurrenceRepository,
+        completed: Boolean,
+    ): Result<TodoTask> {
+        if (task.status == TaskStatus.CANCELLED) {
+            return Result.failure(IllegalStateException("待办已取消，不再记录各次完成"))
+        }
+        val t = now()
+        if (completed) {
+            val completedDays = occurrenceRepo.listByTask(task.id)
+                .filter { it.completed }
+                .map { it.occurrenceEpochDay }
+                .toSet()
+            val next = RecurrenceUseCases.nextUnfinishedDay(
+                task,
+                completedDays,
+                TaskDue.todayEpochDay(task.dueZoneId, t),
+            )
+            occurrenceRepo.upsert(
+                TaskOccurrence(
+                    taskId = task.id,
+                    occurrenceEpochDay = next,
+                    completed = true,
+                    completedAt = t,
+                    updatedAt = t,
+                ),
+            )
+        } else {
+            // 撤销最近一次已完成的出现；没有则原样返回（幂等）
+            occurrenceRepo.listByTask(task.id)
+                .filter { it.completed }
+                .maxByOrNull { it.completedAt ?: 0L }
+                ?.let { latest ->
+                    occurrenceRepo.upsert(latest.copy(completed = false, completedAt = null, updatedAt = t))
+                }
+        }
+        return Result.success(repository.getTask(task.id) ?: task)
+    }
 
     private fun validate(input: TaskInput): String? = when {
         input.title.isBlank() -> "标题不能为空"
         input.dueEpochDay != null && input.dueAtMillis != null -> "日期截止与时刻截止只能选择其一"
-        else -> null
+        else -> RecurrenceRule.validate(input.recurrenceRule)
     }
 }
