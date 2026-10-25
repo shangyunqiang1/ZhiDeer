@@ -25,6 +25,11 @@ class CalendarRepositoryImpl(
         calendarEntryDao.get(id)?.toModel()
     }
 
+    override suspend fun getEntriesLinkedToTask(taskId: String): List<CalendarEntry> =
+        withContext(ioDispatcher) {
+            calendarEntryDao.getByTaskId(taskId).map { it.toModel() }
+        }
+
     override suspend fun upsertEntry(entry: CalendarEntry) = withContext(ioDispatcher) {
         calendarEntryDao.upsert(entry.toEntity())
     }
