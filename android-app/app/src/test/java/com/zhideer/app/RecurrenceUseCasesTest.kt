@@ -117,6 +117,12 @@ class RecurrenceUseCasesTest {
         recurrenceRule = RecurrenceRule(frequency = RecurrenceFrequency.WEEKLY, weekdays = weekdays),
     )
 
+    private fun monthlyInput(title: String = "月末对账", monthDay: Int = 31) = TaskInput(
+        title = title,
+        dueZoneId = zone.id,
+        recurrenceRule = RecurrenceRule(frequency = RecurrenceFrequency.MONTHLY, monthDay = monthDay),
+    )
+
     // ---------- 规则校验 ----------
 
     @Test
@@ -533,6 +539,224 @@ class RecurrenceUseCasesTest {
             RecurrenceRule(RecurrenceFrequency.WEEKLY, weekdays = setOf(DayOfWeek.MONDAY, DayOfWeek.WEDNESDAY, DayOfWeek.FRIDAY)).summary(),
         )
         assertEquals("每周 日", RecurrenceRule(RecurrenceFrequency.WEEKLY, weekdays = setOf(DayOfWeek.SUNDAY)).summary())
+    }
+
+    // ---------- 每月规则（T13/#14）----------
+
+    @Test
+    fun 每月规则校验拒绝无效第几日() = runBlocking {
+        assertEquals("每月重复需选择 1-31 日", RecurrenceRule.validate(RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 0)))
+        assertEquals("每月重复需选择 1-31 日", RecurrenceRule.validate(RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 32)))
+        assertNull(RecurrenceRule.validate(RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 1)))
+        assertNull(RecurrenceRule.validate(RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 31)))
+
+        // 用例入口同样拒绝
+        clock.add(millis("2026-10-25"))
+        val created = taskUseCases.create(dailyInput()).getOrThrow()
+        val bad = recurrenceUseCases.create(created.id, RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 0))
+        assertTrue(bad.isFailure)
+        assertEquals("每月重复需选择 1-31 日", bad.exceptionOrNull()!!.message)
+
+        // 创建输入直接携带也拒绝
+        val badInput = taskUseCases.create(
+            TaskInput(
+                title = "无效月规则",
+                dueZoneId = zone.id,
+                recurrenceRule = RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 32),
+            ),
+        )
+        assertTrue(badInput.isFailure)
+        assertEquals("每月重复需选择 1-31 日", badInput.exceptionOrNull()!!.message)
+    }
+
+    @Test
+    fun 每月15日常规与跨年出现() = runBlocking {
+        clock.add(millis("2026-11-15"))
+        val task = taskUseCases.create(monthlyInput(title = "月度账单", monthDay = 15)).getOrThrow()
+
+        val days = recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-11-01"), epochDay("2027-01-31"))
+            .getOrThrow()
+        assertEquals(listOf("2026-11-15", "2026-12-15", "2027-01-15").map(::epochDay), days)
+        // 锚点之前不出现
+        val before = recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-11-01"), epochDay("2026-11-14"))
+            .getOrThrow()
+        assertEquals(emptyList<Long>(), before)
+    }
+
+    @Test
+    fun 每月31日短月落到月末且三月回到31日不漂移() = runBlocking {
+        // issue #14 示例：每月 31 日遇二月落月末（2026 非闰年 → 2-28），三月仍回到 31 日，不漂移成每月 28 日
+        clock.add(millis("2026-01-31"))
+        val task = taskUseCases.create(monthlyInput(title = "月末对账", monthDay = 31)).getOrThrow()
+
+        val days = recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-01-01"), epochDay("2026-04-30"))
+            .getOrThrow()
+        assertEquals(
+            listOf("2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30").map(::epochDay),
+            days,
+        )
+    }
+
+    @Test
+    fun 每月29与30日跨闰年出现() = runBlocking {
+        // 锚点 2026-12-29：跨年 12-29 → 1-29；2027-02（非闰）落 28 日，2028-02（闰）回到 29 日
+        clock.add(millis("2026-12-29"))
+        val task29 = taskUseCases.create(monthlyInput(title = "闰日维护", monthDay = 29)).getOrThrow()
+
+        assertEquals(
+            listOf("2026-12-29", "2027-01-29").map(::epochDay),
+            recurrenceUseCases.occurrencesForRange(task29.id, epochDay("2026-12-01"), epochDay("2027-01-31")).getOrThrow(),
+        )
+        assertEquals(
+            listOf(epochDay("2027-02-28")),
+            recurrenceUseCases.occurrencesForRange(task29.id, epochDay("2027-02-01"), epochDay("2027-02-28")).getOrThrow(),
+        )
+        assertEquals(
+            listOf(epochDay("2028-02-29")),
+            recurrenceUseCases.occurrencesForRange(task29.id, epochDay("2028-02-01"), epochDay("2028-02-29")).getOrThrow(),
+        )
+
+        // 第 30 日：闰年二月（29 天）落 29 日
+        val task30 = taskUseCases.create(monthlyInput(title = "三十号任务", monthDay = 30)).getOrThrow()
+        assertEquals(
+            listOf(epochDay("2028-02-29")),
+            recurrenceUseCases.occurrencesForRange(task30.id, epochDay("2028-02-01"), epochDay("2028-02-29")).getOrThrow(),
+        )
+    }
+
+    @Test
+    fun 每月各次出现分别记录完成且未完成不阻止下一次() = runBlocking {
+        clock.add(millis("2026-01-31"))
+        val task = taskUseCases.create(monthlyInput(title = "月末复盘", monthDay = 31)).getOrThrow()
+        val jan31 = epochDay("2026-01-31")
+        val feb28 = epochDay("2026-02-28")
+
+        clock.add(millis("2026-01-31", "18:00"))
+        recurrenceUseCases.completeOccurrence(task.id, jan31, true).getOrThrow()
+
+        // 一月的出现已处理，二月的短月出现照常生成且未完成（GLOSSARY：本次未完成不阻止下一次）
+        clock.add(millis("2026-02-28", "08:00"))
+        val onFeb = recurrenceUseCases.observeForDay(feb28).first()
+        assertEquals(listOf(task.id), onFeb.map { it.task.id })
+        assertFalse(onFeb.single().completed)
+        // 非出现日被拒绝（2-27 不是该规则的出现日）
+        val notScheduled = recurrenceUseCases.completeOccurrence(task.id, epochDay("2026-02-27"), true)
+        assertTrue(notScheduled.isFailure)
+        assertEquals("该日期不属于重复计划", notScheduled.exceptionOrNull()!!.message)
+
+        // 二月独立完成，与一月记录互不影响
+        clock.add(millis("2026-02-28", "09:00"))
+        recurrenceUseCases.completeOccurrence(task.id, feb28, true).getOrThrow()
+        val records = occurrenceRepository.listByTask(task.id).sortedBy { it.occurrenceEpochDay }
+        assertEquals(2, records.size)
+        assertEquals(jan31, records[0].occurrenceEpochDay)
+        assertTrue(records[0].completed)
+        assertEquals(feb28, records[1].occurrenceEpochDay)
+        assertTrue(records[1].completed)
+
+        // 撤销二月完成不影响一月
+        clock.add(millis("2026-02-28", "10:00"))
+        recurrenceUseCases.completeOccurrence(task.id, feb28, false).getOrThrow()
+        val after = occurrenceRepository.listByTask(task.id).sortedBy { it.occurrenceEpochDay }
+        assertEquals(2, after.size)
+        assertTrue(after[0].completed)
+        assertFalse(after[1].completed)
+    }
+
+    @Test
+    fun 错过的每月出现按逾期呈现且不自动完成() = runBlocking {
+        // 锚点 2026-01-31 出现一次，未处理；时钟直接推进到 2026-03-30：
+        // 1-31 与 2-28 两次出现均已错过，整行按逾期呈现
+        clock.add(millis("2026-01-31", "08:00"))
+        val task = taskUseCases.create(monthlyInput(title = "月度盘点", monthDay = 31)).getOrThrow()
+
+        clock.add(millis("2026-03-30", "09:00"))
+        assertEquals(listOf("月度盘点"), titles(TaskFilter.OVERDUE))
+        assertEquals(emptyList<String>(), titles(TaskFilter.TODAY))
+        assertEquals(
+            emptyList<Long>(),
+            occurrenceRepository.listByTask(task.id).filter { it.completed }.map { it.occurrenceEpochDay },
+        )
+        val state = TaskDue.RecurringDueState(
+            nextUnfinishedDay = epochDay("2026-01-31"),
+            todayEpochDay = epochDay("2026-03-30"),
+        )
+        assertTrue(TaskDue.matches(taskUseCases.get(task.id)!!, TaskFilter.OVERDUE, clock.last(), state))
+
+        // 通过列表完成动作处理最早一次错过（1-31）后，2-28 仍错过：分别记录、不静默消失
+        taskUseCases.complete(task.id, completed = true).getOrThrow()
+        assertEquals(
+            listOf(epochDay("2026-01-31")),
+            occurrenceRepository.listByTask(task.id).filter { it.completed }.map { it.occurrenceEpochDay },
+        )
+        assertEquals(listOf("月度盘点"), titles(TaskFilter.OVERDUE))
+    }
+
+    @Test
+    fun 每月规则与各次记录关闭重开后保留() = runBlocking {
+        clock.add(millis("2026-01-31"))
+        val task = taskUseCases.create(monthlyInput(title = "月度回顾", monthDay = 31)).getOrThrow()
+        clock.add(millis("2026-02-28", "09:00"))
+        recurrenceUseCases.completeOccurrence(task.id, epochDay("2026-02-28"), true).getOrThrow()
+        db.close()
+        open()
+
+        val readBack = taskUseCases.get(task.id)
+        assertNotNull(readBack!!.recurrenceRule)
+        assertEquals(RecurrenceFrequency.MONTHLY, readBack.recurrenceRule!!.frequency)
+        assertEquals(31, readBack.recurrenceRule.monthDay)
+        val records = occurrenceRepository.listByTask(task.id)
+        assertEquals(1, records.size)
+        assertTrue(records.single().completed)
+        assertEquals(epochDay("2026-02-28"), records.single().occurrenceEpochDay)
+        // 重开后三月仍回到 31 日，不因持久化漂移
+        assertEquals(
+            listOf(epochDay("2026-03-31")),
+            recurrenceUseCases.occurrencesForRange(task.id, epochDay("2026-03-01"), epochDay("2026-03-31")).getOrThrow(),
+        )
+    }
+
+    @Test
+    fun 每月锚点跟随创建时区() = runBlocking {
+        // 与每日一致：同一 UTC 时刻，奥克兰（UTC+13）锚点日期比上海晚一天（1-31 vs 1-30）
+        val shanghai = ZoneId.of("Asia/Shanghai")
+        val auckland = ZoneId.of("Pacific/Auckland")
+        val utcInstant = LocalDate.parse("2026-01-30").atTime(20, 0).atZone(shanghai).toInstant().toEpochMilli()
+        clock.add(utcInstant)
+        assertEquals("2026-01-30", LocalDate.ofInstant(java.time.Instant.ofEpochMilli(utcInstant), shanghai).toString())
+        assertEquals("2026-01-31", LocalDate.ofInstant(java.time.Instant.ofEpochMilli(utcInstant), auckland).toString())
+
+        val shanghaiTask = taskUseCases.create(
+            TaskInput(
+                title = "上海月报",
+                dueZoneId = shanghai.id,
+                recurrenceRule = RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 30),
+            ),
+        ).getOrThrow()
+        val aucklandTask = taskUseCases.create(
+            TaskInput(
+                title = "奥克兰月报",
+                dueZoneId = auckland.id,
+                recurrenceRule = RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 30),
+            ),
+        ).getOrThrow()
+
+        // 上海锚点 1-30：1-30 即出现（含），2 月短月落 28 日，3 月回到 30 日
+        assertEquals(
+            listOf("2026-01-30", "2026-02-28", "2026-03-30").map(::epochDay),
+            recurrenceUseCases.occurrencesForRange(shanghaiTask.id, epochDay("2026-01-30"), epochDay("2026-03-31")).getOrThrow(),
+        )
+        // 奥克兰锚点 1-31：1-30 早于锚点不出现，首现为 2-28（短月回落）
+        assertEquals(
+            listOf("2026-02-28", "2026-03-30").map(::epochDay),
+            recurrenceUseCases.occurrencesForRange(aucklandTask.id, epochDay("2026-01-30"), epochDay("2026-03-31")).getOrThrow(),
+        )
+    }
+
+    @Test
+    fun 每月规则摘要为中文() {
+        assertEquals("每月 15 日", RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 15).summary())
+        assertEquals("每月 31 日", RecurrenceRule(RecurrenceFrequency.MONTHLY, monthDay = 31).summary())
     }
 
     private suspend fun titles(filter: TaskFilter): List<String> =

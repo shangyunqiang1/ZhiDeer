@@ -28,6 +28,8 @@ data class TaskEntity(
     val cancelledAt: Long?,
     // T12/#13 纯新增：重复规则拆列（可空 = 非重复待办）。
     // 出现锚点不冗余存储，由 createdAt 在 dueZoneId 下派生。
+    // T13/#14：MONTHLY 复用 recurrenceIntervalDays 列存「每月第几日」（1-31），
+    // 以 recurrenceFrequency 列区分两种语义，避免新增列导致数据库升版。
     val recurrenceFrequency: String? = null,
     val recurrenceIntervalDays: Int? = null,
     val recurrenceWeekdays: String? = null,
@@ -69,7 +71,13 @@ fun TodoTask.toEntity() = TaskEntity(
     postponedAt = postponedAt,
     cancelledAt = cancelledAt,
     recurrenceFrequency = recurrenceRule?.frequency?.name,
-    recurrenceIntervalDays = recurrenceRule?.takeIf { it.frequency == RecurrenceFrequency.DAILY }?.intervalDays,
+    recurrenceIntervalDays = recurrenceRule?.let { rule ->
+        when (rule.frequency) {
+            RecurrenceFrequency.DAILY -> rule.intervalDays
+            RecurrenceFrequency.MONTHLY -> rule.monthDay
+            else -> null
+        }
+    },
     recurrenceWeekdays = recurrenceRule
         ?.takeIf { it.frequency == RecurrenceFrequency.WEEKLY }
         ?.weekdays?.sorted()?.joinToString(",") { it.name },
@@ -79,6 +87,10 @@ private fun String.toRecurrenceRule(intervalDays: Int?, weekdaysRaw: String?): R
     RecurrenceFrequency.DAILY.name -> RecurrenceRule(
         frequency = RecurrenceFrequency.DAILY,
         intervalDays = intervalDays ?: 1,
+    )
+    RecurrenceFrequency.MONTHLY.name -> RecurrenceRule(
+        frequency = RecurrenceFrequency.MONTHLY,
+        monthDay = intervalDays ?: 1,
     )
     RecurrenceFrequency.WEEKLY.name -> RecurrenceRule(
         frequency = RecurrenceFrequency.WEEKLY,
