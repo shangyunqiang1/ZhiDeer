@@ -514,6 +514,14 @@ class AppContainer(
             // T32/#33 整库恢复：Room 事务成功后经同一会话存储还原备份中的会话历史；
             // 恢复路径绝不触碰 aiConfigStore（API Key 安全边界）。
             sessionRestorer = { sessions -> aiSessionStore.save(sessions) },
+            // T33/#34：参谋建议的反馈、采纳执行记录与提案依据绑定（DataStore JSON）
+            // 同样纳入备份；还原时保存备份记录并让恢复前待确认的旧建议提案失效，
+            // 恢复后必须重新生成建议并确认（依据可能已随整库替换变化）。
+            advisorHistory = { advisorRecordStore.load() },
+            advisorRestorer = { records -> advisorUseCases.restoreAdvisorRecords(records) },
+            // T33/#34：恢复数据不等于恢复 AI 外发权限——成功替换数据后重置上下文授权，
+            // 用户须重新确认；恢复路径绝不读取或写入 API Key 与本机配置。
+            aiAuthorizationResetter = { aiContextAuthorizer.revoke() },
         )
     }
 
