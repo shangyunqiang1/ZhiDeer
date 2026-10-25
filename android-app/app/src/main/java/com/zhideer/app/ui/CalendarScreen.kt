@@ -73,7 +73,7 @@ private enum class DayFilter(val label: String) {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CalendarScreen(useCases: CalendarUseCases, deviceZone: ZoneId) {
+fun CalendarScreen(useCases: CalendarUseCases, deviceZone: ZoneId, calendarReminderUseCases: com.zhideer.app.domain.usecase.CalendarReminderUseCases) {
     val scope = rememberCoroutineScope()
     val nowMillis = remember { System.currentTimeMillis() }
     val today: LocalDate = remember { LocalDate.ofInstant(Instant.ofEpochMilli(nowMillis), deviceZone) }
@@ -241,6 +241,7 @@ fun CalendarScreen(useCases: CalendarUseCases, deviceZone: ZoneId) {
         CalendarDetailDialog(
             entry = entry,
             deviceZone = deviceZone,
+            reminderUseCases = calendarReminderUseCases,
             onDismiss = { viewing = null },
             onEdit = {
                 viewing = null
@@ -605,6 +606,7 @@ fun CalendarEditorDialog(
 fun CalendarDetailDialog(
     entry: CalendarEntry,
     deviceZone: ZoneId,
+    reminderUseCases: com.zhideer.app.domain.usecase.CalendarReminderUseCases,
     onDismiss: () -> Unit,
     onEdit: () -> Unit,
     onTrash: () -> Unit,
@@ -627,6 +629,13 @@ fun CalendarDetailDialog(
                     Text("时区确认于：${formatMillis(it, zone)}")
                 }
                 Text("创建于：${formatMillis(entry.createdAt, zone)}")
+                com.zhideer.app.ui.CalendarRemindersPanel(
+                    useCases = reminderUseCases,
+                    entryId = entry.id,
+                    zoneId = zone,
+                    startMillis = entry.startMillis,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
                     Text(
                         "若设备时区与所存时区不一致，请在列表上方的提示条中核对。",

@@ -68,7 +68,11 @@ private fun MainTabs(container: com.zhideer.app.di.AppContainer) {
                     calendarUseCases = container.calendarUseCases,
                     reminderUseCases = container.reminderUseCases,
                 )
-                Tab.CALENDAR -> CalendarScreen(useCases = container.calendarUseCases, deviceZone = ZoneId.systemDefault())
+                Tab.CALENDAR -> CalendarScreen(
+                    useCases = container.calendarUseCases,
+                    deviceZone = ZoneId.systemDefault(),
+                    calendarReminderUseCases = container.calendarReminderUseCases,
+                )
                 Tab.NOTES -> NotesScreen(useCases = container.noteUseCases)
                 Tab.AI -> com.zhideer.app.ui.AiScreen(useCases = container.aiChatUseCases)
             }
