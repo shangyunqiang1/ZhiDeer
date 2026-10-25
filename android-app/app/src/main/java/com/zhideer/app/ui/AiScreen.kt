@@ -41,9 +41,16 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.zhideer.app.domain.model.AiChatRole
 import com.zhideer.app.domain.model.AiChatSession
+import com.zhideer.app.domain.model.AiProposal
+import com.zhideer.app.domain.model.AiProposalItem
+import com.zhideer.app.domain.model.AiProposalKind
+import com.zhideer.app.domain.model.AiProposalSendOutcome
+import com.zhideer.app.domain.model.AiProposalStatus
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiConfigInput
 import com.zhideer.app.domain.usecase.AiContextCategory
+import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.proposalDueText
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -52,20 +59,26 @@ import java.time.format.DateTimeFormatter
 private val aiTimeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
 /**
- * AI 助手主界面（T17/#18、T18/#19），公开供根导航挂载：
+ * AI 助手主界面（T17/#18、T18/#19、T19/#20），公开供根导航挂载：
  * - 会话列表 + 新建会话 + 重开 + 删除；
  * - 聊天视图：多轮流式回复、发送/停止、生成中可取消；
+ * - 创建模式（#20）：开启后发送走提案路径——AI 起草待办/便签操作提案，
+ *   提案以卡片呈现在对话流中（完整字段预览 + 「确认创建」「忽略」与逐项「移除」），
+ *   确认前绝不写入业务数据，确认后回执含已创建记录标识写回对话；
  * - 授权面板（#19）：列出将随请求提供的上下文类别（会话历史/待办/日程/便签），
  *   各类别独立勾选、整体确认授权、可随时撤销；对话页显示"已授权范围"徽标；
- *   已授权时发送走 [AiChatUseCases.sendWithAuthorizedContext]，未授权回退普通发送（不含本地数据）；
+ *   已授权时普通发送走 [AiChatUseCases.sendWithAuthorizedContext]，未授权回退普通发送（不含本地数据）；
+ *   创建提案只写不读，不需要授权（#20）；
  * - 配置对话框：API Key（掩码输入、可切换显示）、模型标识、Base URL、「测试连接」。
  * 全部文案为中文；错误提示来自用例层（已是中文可诊断文案）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiScreen(useCases: AiChatUseCases) {
+fun AiScreen(useCases: AiChatUseCases, proposalUseCases: AiProposalUseCases) {
     val scope = rememberCoroutineScope()
     val sessions by useCases.listSessions().collectAsState(initial = emptyList())
+    // 提案（#20）：卡片渲染按当前会话过滤
+    val allProposals by proposalUseCases.observeProposals().collectAsState(initial = emptyList())
     // 授权状态（#19）：会话级、内存保存；null = 未授权
     val grant by useCases.observeContextGrant().collectAsState(initial = useCases.currentContextGrant())
     var chatSessionId by remember { mutableStateOf<String?>(null) } // null=列表页；""=新会话；其他=既有会话
@@ -76,6 +89,10 @@ fun AiScreen(useCases: AiChatUseCases) {
     var error by remember { mutableStateOf<String?>(null) }
     var showConfig by remember { mutableStateOf(false) }
     var showAuth by remember { mutableStateOf(false) }
+    // #20：创建模式开关——开启时发送走提案路径（AI 起草提案，确认后创建）
+    var createMode by remember { mutableStateOf(false) }
+    // #20：正在确认中的提案 id（确认按钮防重）
+    var confirmingId by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         topBar = {
@@ -144,19 +161,32 @@ fun AiScreen(useCases: AiChatUseCases) {
                         scope.launch {
                             // 新会话传 null，由用例创建；既有会话传 id
                             val id = chatSessionId?.takeIf { it.isNotEmpty() }
-                            // #19：已授权（至少一个类别）时发送携带真实记录快照；未授权回退普通发送（不含本地数据）
-                            val grantNow = useCases.currentContextGrant()
-                            val result = if (grantNow == null || grantNow.isEmpty) {
-                                useCases.sendStreaming(id, text) { delta -> streamingText += delta }
+                            // #20：创建模式走提案路径（只写不读，不需要授权）；
+                            // #19：普通模式已授权时发送携带真实记录快照，未授权回退普通发送
+                            val result: Result<*> = if (createMode) {
+                                proposalUseCases.sendAndIngest(id, text) { delta -> streamingText += delta }
                             } else {
-                                useCases.sendWithAuthorizedContext(id, text) { delta -> streamingText += delta }
+                                val grantNow = useCases.currentContextGrant()
+                                if (grantNow == null || grantNow.isEmpty) {
+                                    useCases.sendStreaming(id, text) { delta -> streamingText += delta }
+                                } else {
+                                    useCases.sendWithAuthorizedContext(id, text) { delta -> streamingText += delta }
+                                }
                             }
                             generating = false
                             result
-                                .onSuccess { session ->
+                                .onSuccess { value ->
                                     streamingText = null
-                                    chatSessionId = session.id
-                                    currentSession = session
+                                    val session = when (value) {
+                                        is AiChatSession -> value
+                                        is AiProposalSendOutcome.PlainReply -> value.session
+                                        is AiProposalSendOutcome.ProposalCreated -> value.session
+                                        else -> null
+                                    }
+                                    session?.let {
+                                        chatSessionId = it.id
+                                        currentSession = it
+                                    }
                                 }
                                 .onFailure { e ->
                                     streamingText = null
@@ -173,6 +203,34 @@ fun AiScreen(useCases: AiChatUseCases) {
                     }
                 },
                 grantedLabels = grant?.categories?.joinToString("、") { it.label },
+                createMode = createMode,
+                onCreateModeChange = { createMode = it; error = null },
+                proposals = allProposals.filter { it.sessionId == (chatSessionId?.takeIf { id -> id.isNotEmpty() }) },
+                proposalZone = proposalUseCases.zoneId,
+                confirmingId = confirmingId,
+                onConfirmProposal = { proposalId ->
+                    confirmingId = proposalId
+                    scope.launch {
+                        val outcome = proposalUseCases.confirmProposal(proposalId)
+                        confirmingId = null
+                        outcome
+                            .onFailure { e -> error = e.message }
+                        // 回执由用例层写回会话；刷新本地会话以显示回执消息
+                        chatSessionId?.let { currentSession = useCases.openSession(it) }
+                    }
+                },
+                onDismissProposal = { proposalId ->
+                    scope.launch {
+                        proposalUseCases.dismissProposal(proposalId)
+                            .onFailure { e -> error = e.message }
+                    }
+                },
+                onRemoveProposalItem = { proposalId, itemId ->
+                    scope.launch {
+                        proposalUseCases.removeProposalItem(proposalId, itemId)
+                            .onFailure { e -> error = e.message }
+                    }
+                },
                 modifier = Modifier.fillMaxSize().padding(padding),
                 error = error,
             )
@@ -242,7 +300,7 @@ private fun SessionList(
     }
 }
 
-/** 聊天视图：授权范围徽标 + 消息流 + 流式生成中的部分回复 + 输入行（发送/停止）。 */
+/** 聊天视图：授权范围徽标 + 消息流 + 提案卡片（#20）+ 流式生成中的部分回复 + 输入行（创建模式/发送/停止）。 */
 @Composable
 private fun ChatView(
     session: AiChatSession?,
@@ -253,6 +311,14 @@ private fun ChatView(
     onSend: () -> Unit,
     onStop: () -> Unit,
     grantedLabels: String?,
+    createMode: Boolean,
+    onCreateModeChange: (Boolean) -> Unit,
+    proposals: List<AiProposal>,
+    proposalZone: ZoneId,
+    confirmingId: String?,
+    onConfirmProposal: (String) -> Unit,
+    onDismissProposal: (String) -> Unit,
+    onRemoveProposalItem: (String, String) -> Unit,
     modifier: Modifier = Modifier,
     error: String?,
 ) {
@@ -273,6 +339,17 @@ private fun ChatView(
             items(session?.messages ?: emptyList(), key = { it.content.hashCode().toLong() }) { message ->
                 MessageBubble(role = message.role, content = message.content)
             }
+            // #20：本会话的操作提案卡片（确认前绝不写入业务数据）
+            items(proposals, key = { "proposal-${it.id}" }) { proposal ->
+                ProposalCard(
+                    proposal = proposal,
+                    zoneId = proposalZone,
+                    busy = confirmingId == proposal.id,
+                    onConfirm = { onConfirmProposal(proposal.id) },
+                    onDismiss = { onDismissProposal(proposal.id) },
+                    onRemoveItem = { itemId -> onRemoveProposalItem(proposal.id, itemId) },
+                )
+            }
             if (generating && streamingText != null) {
                 item(key = "streaming") {
                     MessageBubble(
@@ -281,6 +358,17 @@ private fun ChatView(
                     )
                 }
             }
+        }
+        // #20：创建模式开关——开启后 AI 把一句话起草为待办/便签操作提案，确认后才创建
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        ) {
+            Checkbox(checked = createMode, onCheckedChange = onCreateModeChange)
+            Text(
+                "创建模式：让 AI 起草待办/便签提案（确认后才会创建）",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -567,6 +655,132 @@ private fun AiContextPanel(
             }
         },
     )
+}
+
+/**
+ * 操作提案卡片（#20）：完整字段预览（截止按创建时区换算的可读时间）+ 状态标记 +
+ * 「确认创建」「忽略」按钮与逐项「移除」。PENDING 才有操作按钮；
+ * EXECUTED 显示含已创建记录标识的中文回执；CONFIRMED 显示结果待核实；EXPIRED 不残留可执行操作。
+ */
+@Composable
+private fun ProposalCard(
+    proposal: AiProposal,
+    zoneId: ZoneId,
+    busy: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    onRemoveItem: (String) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "操作提案",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    proposalStatusLabel(proposal.status),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            proposal.items.forEach { item ->
+                ProposalItemRow(
+                    item = item,
+                    zoneId = zoneId,
+                    removable = proposal.status == AiProposalStatus.PENDING && !busy,
+                    onRemove = { onRemoveItem(item.id) },
+                )
+            }
+            proposal.resultMessage?.let { receipt ->
+                Text(
+                    receipt,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+            if (proposal.status == AiProposalStatus.PENDING) {
+                Row(modifier = Modifier.padding(top = 8.dp)) {
+                    Button(onClick = onConfirm, enabled = !busy) {
+                        Text(if (busy) "创建中…" else "确认创建")
+                    }
+                    OutlinedButton(onClick = onDismiss, enabled = !busy, modifier = Modifier.padding(start = 8.dp)) {
+                        Text("忽略")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 提案条目字段预览：待办（截止/优先级/分类/备注）或便签（正文/标签/清单项），保留原话不改写。 */
+@Composable
+private fun ProposalItemRow(
+    item: AiProposalItem,
+    zoneId: ZoneId,
+    removable: Boolean,
+    onRemove: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (item.kind == AiProposalKind.TASK) "[待办]" else "[便签]",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                item.title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f).padding(start = 4.dp),
+            )
+            if (removable) {
+                TextButton(onClick = onRemove) { Text("移除") }
+            }
+        }
+        val details = buildList {
+            when (item.kind) {
+                AiProposalKind.TASK -> {
+                    proposalDueText(item, zoneId)?.let { add("截止：$it") }
+                    add("优先级：${priorityCn(item.priority)}")
+                    if (item.category.isNotBlank()) add("分类：${item.category}")
+                    if (item.note.isNotBlank()) add("备注：${item.note}")
+                }
+                AiProposalKind.NOTE -> {
+                    if (item.content.isNotBlank()) add("正文：${item.content}")
+                    if (item.tags.isNotEmpty()) add("标签：${item.tags.joinToString("、")}")
+                    item.items.forEachIndexed { index, text -> add("清单${index + 1}：$text") }
+                }
+            }
+        }
+        details.forEach { line ->
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+        }
+    }
+}
+
+private fun proposalStatusLabel(status: AiProposalStatus): String = when (status) {
+    AiProposalStatus.PENDING -> "待确认"
+    AiProposalStatus.CONFIRMED -> "已确认 · 结果待核实"
+    AiProposalStatus.EXECUTED -> "已完成"
+    AiProposalStatus.EXPIRED -> "已忽略或已失效"
+}
+
+private fun priorityCn(priority: String): String = when (priority) {
+    "LOW" -> "低"
+    "HIGH" -> "高"
+    else -> "普通"
 }
 
 private fun formatMillis(millis: Long): String {

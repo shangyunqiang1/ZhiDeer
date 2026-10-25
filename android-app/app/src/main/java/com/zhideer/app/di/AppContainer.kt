@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.zhideer.app.data.ai.AiConfigStore
+import com.zhideer.app.data.ai.AiProposalStore
 import com.zhideer.app.data.ai.AiSessionStore
 import com.zhideer.app.data.ai.DeepSeekChatClient
 import com.zhideer.app.data.ai.EncryptedAiConfigStore
@@ -26,6 +27,7 @@ import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiChatUseCases
 import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
+import com.zhideer.app.domain.usecase.AiProposalUseCases
 import com.zhideer.app.domain.usecase.CalendarReminderUseCases
 import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
@@ -241,6 +243,26 @@ class AppContainer(
             now = nowMillis,
             contextAuthorizer = aiContextAuthorizer,
             contextProvider = aiContextProvider,
+            zoneId = zoneId,
+        )
+    }
+
+    // —— 操作提案（T19/#20）：纯新增装配 ——
+    // 提案草稿存 DataStore JSON（有意避开 Room，数据库零改动）；
+    // 确认创建走 taskUseCases/noteUseCases 真实入口（不绕过），忽略/幂等状态机在用例层。
+    val aiProposalStore: AiProposalStore by lazy {
+        AiProposalStore(File(context.filesDir, "ai_proposals.preferences_pb"))
+    }
+
+    val aiProposalUseCases: AiProposalUseCases by lazy {
+        AiProposalUseCases(
+            chat = aiChatUseCases,
+            store = aiProposalStore,
+            taskUseCases = taskUseCases,
+            noteUseCases = noteUseCases,
+            idGen = { UUID.randomUUID().toString() },
+            now = nowMillis,
+            zoneId = zoneId,
         )
     }
 }
