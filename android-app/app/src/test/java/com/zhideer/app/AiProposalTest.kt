@@ -9,8 +9,13 @@ import com.zhideer.app.domain.model.AiConfig
 import com.zhideer.app.domain.model.AiProposalKind
 import com.zhideer.app.domain.model.AiProposalSendOutcome
 import com.zhideer.app.domain.model.AiProposalStatus
+import com.zhideer.app.domain.model.CalendarEntry
 import com.zhideer.app.domain.model.Note
+import com.zhideer.app.domain.model.Reminder
+import com.zhideer.app.domain.model.ReminderOwner
 import com.zhideer.app.domain.model.TodoTask
+import com.zhideer.app.domain.repository.CalendarRemindersRepository
+import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.TasksRepository
 import com.zhideer.app.domain.usecase.AiChatUseCases
@@ -18,8 +23,11 @@ import com.zhideer.app.domain.usecase.AiContextAuthorizer
 import com.zhideer.app.domain.usecase.AiContextProvider
 import com.zhideer.app.domain.usecase.AiContextSnapshot
 import com.zhideer.app.domain.usecase.AiProposalUseCases
+import com.zhideer.app.domain.usecase.CalendarReminderUseCases
+import com.zhideer.app.domain.usecase.CalendarUseCases
 import com.zhideer.app.domain.usecase.NoteUseCases
 import com.zhideer.app.domain.usecase.TaskUseCases
+import com.zhideer.app.platform.AlarmScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -81,10 +89,15 @@ class AiProposalTest {
     private lateinit var proposals: AiProposalUseCases
     private lateinit var fakeTasks: FakeTasksRepository
     private lateinit var fakeNotes: FakeNotesRepository
+    private lateinit var fakeCalendar: FakeCalendarRepository
+    private lateinit var fakeCalendarReminders: FakeCalendarRemindersRepository
+    private lateinit var aiScheduler: AiFakeAlarmScheduler
     private lateinit var storeDir: File
     private val idSeq = AtomicInteger(0)
     private val taskSeq = AtomicInteger(0)
     private val noteSeq = AtomicInteger(0)
+    private val entrySeq = AtomicInteger(0)
+    private val calRemSeq = AtomicInteger(0)
     private var clock: Long = 0L
 
     @Before
@@ -111,6 +124,9 @@ class AiProposalTest {
         )
         fakeTasks = FakeTasksRepository()
         fakeNotes = FakeNotesRepository()
+        fakeCalendar = FakeCalendarRepository()
+        fakeCalendarReminders = FakeCalendarRemindersRepository()
+        aiScheduler = AiFakeAlarmScheduler()
         proposals = AiProposalUseCases(
             chat = chat,
             store = proposalStore,
@@ -123,6 +139,20 @@ class AiProposalTest {
             noteUseCases = NoteUseCases(
                 repository = fakeNotes,
                 idGen = { "note-${noteSeq.incrementAndGet()}" },
+                now = { clock },
+            ),
+            // T20/#21：确认执行经日程与日程提醒真实入口（与 AppContainer 相同组装方式）
+            calendarUseCases = CalendarUseCases(
+                repository = fakeCalendar,
+                idGen = { "entry-${entrySeq.incrementAndGet()}" },
+                now = { clock },
+                zoneId = ZONE.id,
+            ),
+            calendarReminderUseCases = CalendarReminderUseCases(
+                repository = fakeCalendarReminders,
+                calendarRepository = fakeCalendar,
+                scheduler = aiScheduler,
+                idGen = { "calrem-${calRemSeq.incrementAndGet()}" },
                 now = { clock },
             ),
             idGen = { "proposal-${idSeq.incrementAndGet()}" },
@@ -211,6 +241,54 @@ class AiProposalTest {
     private fun assertNoBusinessWrite() {
         assertTrue("未确认前待办仓库必须为空", fakeTasks.tasks.isEmpty())
         assertTrue("未确认前便签仓库必须为空", fakeNotes.notes.isEmpty())
+        assertTrue("未确认前日程仓库必须为空", fakeCalendar.entries.isEmpty())
+        assertTrue("未确认前日程提醒仓库必须为空", fakeCalendarReminders.reminders.isEmpty())
+    }
+
+    /** 模型按协议输出的日程提案 JSON（start/end 为本地时间字符串，由解析层按创建时区换算）。 */
+    private fun scheduleJson(
+        title: String = "项目周会",
+        start: String? = "2026-10-26T14:00",
+        end: String? = "2026-10-26T15:30",
+        location: String? = null,
+        category: String? = null,
+        note: String? = null,
+        reminder: String? = null,
+        reminders: List<String>? = null,
+    ): String = buildString {
+        append("{\"kind\":\"schedule\",\"title\":\"${escapeJson(title)}\"")
+        if (start != null) append(",\"start\":\"$start\"")
+        if (end != null) append(",\"end\":\"$end\"")
+        if (location != null) append(",\"location\":\"${escapeJson(location)}\"")
+        if (category != null) append(",\"category\":\"$category\"")
+        if (note != null) append(",\"note\":\"${escapeJson(note)}\"")
+        if (reminder != null) append(",\"reminder\":$reminder")
+        if (reminders != null) append(",\"reminders\":[${reminders.joinToString(",")}]")
+        append("}")
+    }
+
+    private fun relativeReminderJson(offsetMillis: Long = 1_800_000L): String =
+        "{\"type\":\"relative\",\"offsetMillis\":$offsetMillis}"
+
+    private fun absoluteReminderJson(remindAt: String): String =
+        "{\"type\":\"absolute\",\"remindAt\":\"$remindAt\"}"
+
+    /** 双响应：第一次流式 + 自动重试（非流式），两次均返回同一非法提案。 */
+    private fun enqueueInvalidTwice(badProposalText: String) {
+        server.enqueue(sseProposal(badProposalText))
+        server.enqueue(completionProposal(badProposalText))
+    }
+
+    /** 断言解析失败且整批未保存：中文提示包含全部关键词，提案库与业务仓库均无写入。 */
+    private suspend fun assertParseRejected(text: String, vararg messageParts: String) {
+        val result = send(text)
+        assertTrue("非法提案应解析失败", result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        messageParts.forEach { part ->
+            assertTrue("中文提示应包含「$part」: $message", message.contains(part))
+        }
+        assertTrue(proposalStore.load().isEmpty())
+        assertNoBusinessWrite()
     }
 
     // ---------- 1. 提案解析：合法 ----------
@@ -573,6 +651,393 @@ class AiProposalTest {
         assertEquals("user", messages2[0].jsonObject["role"]!!.jsonPrimitive.content)
     }
 
+    // ---------- 10. 日程提案（T20/#21）：解析与时区换算 ----------
+
+    @Test
+    fun 日程提案解析出时间地点分类备注与相对提醒() = runBlocking {
+        server.enqueue(
+            sseProposal(
+                proposalBlock(
+                    scheduleJson(
+                        location = "3号会议室",
+                        category = "工作",
+                        note = "带笔记本",
+                        reminder = relativeReminderJson(1_800_000L),
+                    ),
+                ),
+            ),
+        )
+
+        val outcome = send("帮我安排明天下午的项目周会").getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val proposal = outcome.proposal
+        assertEquals(AiProposalStatus.PENDING, proposal.status)
+        val item = proposal.items.single()
+        assertEquals(AiProposalKind.SCHEDULE, item.kind)
+        assertEquals("项目周会", item.title)
+        val expectedStart = LocalDateTime.parse("2026-10-26T14:00").atZone(ZONE).toInstant().toEpochMilli()
+        val expectedEnd = LocalDateTime.parse("2026-10-26T15:30").atZone(ZONE).toInstant().toEpochMilli()
+        assertEquals(expectedStart, item.startMillis)
+        assertEquals(expectedEnd, item.endMillis)
+        assertEquals("3号会议室", item.location)
+        assertEquals("工作", item.category)
+        assertEquals("带笔记本", item.note)
+        val reminder = item.reminders.single()
+        assertEquals(1_800_000L, reminder.offsetMillis)
+        assertNull(reminder.remindAtMillis)
+        // 验收核心：提案产生后业务仓库无新记录
+        assertNoBusinessWrite()
+        // 会话中的助手消息为人类可读摘要
+        val summary = outcome.session.messages.last().content
+        assertFalse("摘要不得包含 JSON 代码块标记", summary.contains("```"))
+        assertTrue(summary.contains("项目周会"))
+    }
+
+    @Test
+    fun 日程时间按创建时区换算且摘要跨日明确显示() = runBlocking {
+        server.enqueue(sseProposal(proposalBlock(scheduleJson(start = "2026-10-26T23:00", end = "2026-10-27T01:00"))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val item = outcome.proposal.items.single()
+        assertEquals(
+            LocalDateTime.parse("2026-10-26T23:00").atZone(ZONE).toInstant().toEpochMilli(),
+            item.startMillis,
+        )
+        assertEquals(
+            LocalDateTime.parse("2026-10-27T01:00").atZone(ZONE).toInstant().toEpochMilli(),
+            item.endMillis,
+        )
+        // 跨日：摘要明确写出结束日期（按创建时区换算）
+        val crossDaySummary = outcome.session.messages.last().content
+        assertTrue("跨日应显示完整日期: $crossDaySummary", crossDaySummary.contains("2026-10-26 23:00 ～ 2026-10-27 01:00"))
+
+        // 同日：结束只显示时刻
+        server.enqueue(sseProposal(proposalBlock(scheduleJson())))
+        val sameDay = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val sameDaySummary = sameDay.session.messages.last().content
+        assertTrue("同日应显示开始日期与结束时刻: $sameDaySummary", sameDaySummary.contains("2026-10-26 14:00 ～ 15:30"))
+    }
+
+    @Test
+    fun 提醒数组重复项去重只保留一条() = runBlocking {
+        server.enqueue(
+            sseProposal(
+                proposalBlock(
+                    scheduleJson(
+                        reminders = listOf(relativeReminderJson(1_800_000L), relativeReminderJson(1_800_000L)),
+                    ),
+                ),
+            ),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        assertEquals(1, outcome.proposal.items.single().reminders.size)
+        assertNoBusinessWrite()
+    }
+
+    // ---------- 11. 日程提案：非法时段与非法提醒整批拒绝 ----------
+
+    @Test
+    fun 日程结束早于开始解析拒绝整批不保存() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(scheduleJson(start = "2026-10-26T15:00", end = "2026-10-26T14:00")))
+        assertParseRejected("时间写反了", "结束时间", "早于开始时间")
+    }
+
+    @Test
+    fun 日程缺少结束时间不擅自推断时长解析拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(scheduleJson(end = null)))
+        assertParseRejected("下午三点开个会", "结束时间")
+    }
+
+    @Test
+    fun 独立时刻提醒早于日程开始整批拒绝() = runBlocking {
+        enqueueInvalidTwice(
+            proposalBlock(scheduleJson(reminder = absoluteReminderJson("2026-10-26T13:00"))),
+        )
+        assertParseRejected("提前提醒我", "提醒", "早于日程开始时间")
+    }
+
+    @Test
+    fun 相对提醒提前量非正整批拒绝() = runBlocking {
+        enqueueInvalidTwice(proposalBlock(scheduleJson(reminder = relativeReminderJson(0L))))
+        assertParseRejected("开始时提醒我", "提前量")
+    }
+
+    @Test
+    fun 相对提前量与独立时刻同时给出整批拒绝() = runBlocking {
+        val both = "{\"type\":\"relative\",\"offsetMillis\":60000,\"remindAt\":\"2026-10-26T14:00\"}"
+        enqueueInvalidTwice(proposalBlock(scheduleJson(reminder = both)))
+        assertParseRejected("提醒写复杂了", "只能选择其一")
+    }
+
+    @Test
+    fun 提醒类型无法识别整批拒绝() = runBlocking {
+        val bad = "{\"type\":\"weekly\",\"offsetMillis\":60000}"
+        enqueueInvalidTwice(proposalBlock(scheduleJson(reminder = bad)))
+        assertParseRejected("每周提醒我", "提醒类型")
+    }
+
+    @Test
+    fun 待办或便签提案携带日程字段整批拒绝() = runBlocking {
+        val taskWithSchedule =
+            "{\"kind\":\"task\",\"title\":\"混淆\",\"start\":\"2026-10-26T14:00\",\"end\":\"2026-10-26T15:00\"}"
+        enqueueInvalidTwice(proposalBlock(taskWithSchedule))
+        assertParseRejected("建个待办", "日程时间或提醒字段")
+
+        val noteWithReminder =
+            "{\"kind\":\"note\",\"title\":\"混淆便签\",\"reminder\":{\"type\":\"relative\",\"offsetMillis\":60000}}"
+        enqueueInvalidTwice(proposalBlock(noteWithReminder))
+        assertParseRejected("记个便签", "日程时间或提醒字段")
+
+        val scheduleWithDue =
+            "{\"kind\":\"schedule\",\"title\":\"混淆日程\",\"start\":\"2026-10-26T14:00\"," +
+                "\"end\":\"2026-10-26T15:00\",\"dueDate\":\"2026-10-26\"}"
+        enqueueInvalidTwice(proposalBlock(scheduleWithDue))
+        assertParseRejected("建个日程", "截止")
+    }
+
+    // ---------- 12. 日程提案：确认经真实入口创建日程并设置提醒 ----------
+
+    @Test
+    fun 确认日程提案经真实入口创建日程并设置相对提醒() = runBlocking {
+        server.enqueue(
+            sseProposal(
+                proposalBlock(
+                    scheduleJson(
+                        location = "3号会议室",
+                        category = "工作",
+                        note = "带笔记本",
+                        reminder = relativeReminderJson(1_800_000L),
+                    ),
+                ),
+            ),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val expectedStart = LocalDateTime.parse("2026-10-26T14:00").atZone(ZONE).toInstant().toEpochMilli()
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(AiProposalStatus.EXECUTED, confirmed.status)
+        // 日程经 CalendarUseCases.create 真实入口创建，字段与时区锚定一致
+        val entry = fakeCalendar.entries.values.single()
+        assertEquals("项目周会", entry.title)
+        assertEquals(expectedStart, entry.startMillis)
+        assertEquals(expectedStart + 90 * 60_000L, entry.endMillis)
+        assertEquals(ZONE.id, entry.timezoneId)
+        assertEquals("3号会议室", entry.location)
+        assertEquals("工作", entry.category)
+        assertEquals("带笔记本", entry.note)
+        assertEquals(entry.id, confirmed.createdScheduleIds.single())
+        // 提醒经 CalendarReminderUseCases 真实入口设置：日程归属、相对开始提前量
+        val reminder = fakeCalendarReminders.reminders.values.single()
+        assertEquals(ReminderOwner.CALENDAR, reminder.ownerType)
+        assertEquals(entry.id, reminder.taskId)
+        assertEquals(1_800_000L, reminder.relativeOffsetMillis)
+        assertNull(reminder.remindAtMillis)
+        // 调度请求已按 开始-提前量 提交（提交请求不等于真实触发，回执如实区分）
+        val expectedTrigger = expectedStart - 1_800_000L
+        assertTrue(
+            "应按开始-提前量提交精确闹钟调度请求",
+            aiScheduler.exactCalls.any { it.first == "cal:${reminder.id}" && it.second == expectedTrigger },
+        )
+        // 回执含记录标识并区分提醒结果；结果回写到对话流
+        val receipt = confirmed.resultMessage!!
+        assertTrue("回执应包含日程记录标识: $receipt", receipt.contains(entry.id))
+        assertTrue("回执应说明提醒已设置: $receipt", receipt.contains("提醒已设置（1 条）"))
+        val session = chat.openSession(outcome.session.id)!!
+        assertTrue(session.messages.last().content.contains(entry.id))
+    }
+
+    @Test
+    fun 确认带独立时刻提醒的日程提案() = runBlocking {
+        server.enqueue(
+            sseProposal(proposalBlock(scheduleJson(reminder = absoluteReminderJson("2026-10-26T14:00")))),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        val expectedStart = LocalDateTime.parse("2026-10-26T14:00").atZone(ZONE).toInstant().toEpochMilli()
+
+        proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        val reminder = fakeCalendarReminders.reminders.values.single()
+        assertEquals(expectedStart, reminder.remindAtMillis)
+        assertNull(reminder.relativeOffsetMillis)
+    }
+
+    @Test
+    fun 确认多个提醒的日程提案全部设置() = runBlocking {
+        server.enqueue(
+            sseProposal(
+                proposalBlock(
+                    scheduleJson(
+                        reminders = listOf(relativeReminderJson(1_800_000L), absoluteReminderJson("2026-10-26T16:00")),
+                    ),
+                ),
+            ),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(2, fakeCalendarReminders.reminders.size)
+        val expectedAbs = LocalDateTime.parse("2026-10-26T16:00").atZone(ZONE).toInstant().toEpochMilli()
+        val byRelative = fakeCalendarReminders.reminders.values.single { it.relativeOffsetMillis != null }
+        val byAbsolute = fakeCalendarReminders.reminders.values.single { it.remindAtMillis != null }
+        assertEquals(1_800_000L, byRelative.relativeOffsetMillis)
+        assertEquals(expectedAbs, byAbsolute.remindAtMillis)
+        assertTrue(confirmed.resultMessage!!.contains("提醒已设置（2 条）"))
+    }
+
+    @Test
+    fun 确认无提醒日程提案不产生提醒记录且回执说明无提醒() = runBlocking {
+        server.enqueue(sseProposal(proposalBlock(scheduleJson())))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(1, fakeCalendar.entries.size)
+        assertTrue(fakeCalendarReminders.reminders.isEmpty())
+        assertTrue(aiScheduler.exactCalls.isEmpty())
+        val receipt = confirmed.resultMessage!!
+        assertTrue("回执应明确无提醒状态: $receipt", receipt.contains("未设置提醒"))
+        assertTrue(receipt.contains(confirmed.createdScheduleIds.single()))
+    }
+
+    @Test
+    fun 重复确认日程提案幂等不重建日程与提醒() = runBlocking {
+        server.enqueue(sseProposal(proposalBlock(scheduleJson(reminder = relativeReminderJson()))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val first = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        val second = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(first.id, second.id)
+        assertEquals(1, fakeCalendar.entries.size)
+        assertEquals(1, fakeCalendarReminders.reminders.size)
+        assertEquals(first.createdScheduleIds, second.createdScheduleIds)
+        assertEquals(first.resultMessage, second.resultMessage)
+    }
+
+    @Test
+    fun 日程保存失败如实回执且重复确认不重建() = runBlocking {
+        server.enqueue(sseProposal(proposalBlock(scheduleJson())))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        fakeCalendar.failNextUpsert = "磁盘空间不足"
+
+        val result = proposals.confirmProposal(outcome.proposal.id)
+        assertTrue("部分失败时确认操作本身完成并回执", result.isSuccess)
+        val confirmed = result.getOrThrow()
+        assertEquals(AiProposalStatus.EXECUTED, confirmed.status)
+        assertEquals(0, fakeCalendar.entries.size)
+        val message = confirmed.resultMessage!!
+        assertTrue("回执应如实说明保存失败: $message", message.contains("失败") && message.contains("磁盘空间不足"))
+
+        // 重复确认幂等：不重建
+        val again = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+        assertEquals(0, fakeCalendar.entries.size)
+        assertEquals(confirmed.resultMessage, again.resultMessage)
+    }
+
+    @Test
+    fun 提醒设置失败时日程保留且回执如实说明() = runBlocking {
+        server.enqueue(sseProposal(proposalBlock(scheduleJson(reminder = relativeReminderJson()))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+        fakeCalendarReminders.failNextUpsert = "提醒存储不可用"
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        // 日程已真实创建（部分成功语义与 T19 一致），提醒失败如实回执
+        assertEquals(1, fakeCalendar.entries.size)
+        assertEquals(1, confirmed.createdScheduleIds.size)
+        assertEquals(0, fakeCalendarReminders.reminders.size)
+        val message = confirmed.resultMessage!!
+        assertTrue("回执应包含日程记录标识: $message", message.contains(confirmed.createdScheduleIds.single()))
+        assertTrue("回执应如实说明提醒失败: $message", message.contains("提醒设置失败") && message.contains("提醒存储不可用"))
+    }
+
+    @Test
+    fun 精确闹钟权限不足时提醒保留并回执说明未就绪() = runBlocking {
+        aiScheduler.exactAllowed = false
+        server.enqueue(sseProposal(proposalBlock(scheduleJson(reminder = relativeReminderJson()))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        // 权限不足：提醒记录保留并标记未就绪，不悄悄降级
+        val reminder = fakeCalendarReminders.reminders.values.single()
+        assertEquals(CalendarReminderUseCases.NOT_READY_EXACT_ALARM, reminder.notReadyReason)
+        assertTrue(confirmed.resultMessage!!.contains("未就绪"))
+    }
+
+    @Test
+    fun 调度请求被系统拒绝时提醒保留未就绪回执如实() = runBlocking {
+        aiScheduler.scheduleResult = false
+        server.enqueue(sseProposal(proposalBlock(scheduleJson(reminder = relativeReminderJson()))))
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        val reminder = fakeCalendarReminders.reminders.values.single()
+        assertEquals(CalendarReminderUseCases.NOT_READY_SCHEDULE_FAILED, reminder.notReadyReason)
+        assertTrue(confirmed.resultMessage!!.contains("未就绪"))
+    }
+
+    @Test
+    fun 混合提案确认后分别经各真实入口创建() = runBlocking {
+        server.enqueue(
+            sseProposal(
+                proposalBlock(taskJson(dueDate = "2026-10-26"), scheduleJson(), noteJson(content = "正文")),
+            ),
+        )
+        val outcome = send().getOrThrow() as AiProposalSendOutcome.ProposalCreated
+
+        val confirmed = proposals.confirmProposal(outcome.proposal.id).getOrThrow()
+
+        assertEquals(1, fakeTasks.tasks.size)
+        assertEquals(1, fakeNotes.notes.size)
+        assertEquals(1, fakeCalendar.entries.size)
+        assertEquals(1, confirmed.createdTaskIds.size)
+        assertEquals(1, confirmed.createdNoteIds.size)
+        assertEquals(1, confirmed.createdScheduleIds.size)
+        assertEquals(3, confirmed.items.size)
+    }
+
+    // ---------- 13. 日程提案：取消生成 ----------
+
+    @Test
+    fun 取消生成时日程提案不产生任何写入() = runBlocking {
+        val trickleBody = buildString {
+            repeat(12) { i -> append("data: {\"choices\":[{\"delta\":{\"content\":\"第${i}句\"}}]}\n\n") }
+        }
+        val respondNormal = AtomicBoolean(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                if (respondNormal.get()) {
+                    sseProposal(proposalBlock(scheduleJson(reminder = relativeReminderJson())))
+                } else {
+                    MockResponse.Builder()
+                        .code(200)
+                        .addHeader("Content-Type", "text/event-stream")
+                        .body(trickleBody)
+                        .throttleBody(20, 100, TimeUnit.MILLISECONDS)
+                        .build()
+                }
+        }
+
+        val deltas = AtomicInteger(0)
+        val job = launch(Dispatchers.IO) {
+            proposals.sendAndIngest(null, "帮我安排明天的会") { _ -> deltas.incrementAndGet() }
+        }
+        withTimeout(15_000) {
+            while (deltas.get() < 1) delay(20)
+        }
+        chat.cancelGeneration()
+        job.join()
+        delay(300)
+
+        assertTrue(proposalStore.load().isEmpty())
+        assertNoBusinessWrite()
+        // 沿用既有取消语义：用户消息保留，无部分回复
+        val session = chat.listSessions().first().single()
+        assertEquals(listOf(AiChatRole.USER), session.messages.map { it.role })
+    }
+
     // ---------- 替身 ----------
 
     private fun assertNullBut(actual: Any?, expected: Any?) = assertEquals(expected, actual)
@@ -623,6 +1088,94 @@ class AiProposalTest {
         override suspend fun listTrashedNotes(): List<Note> = notes.values.filter { it.trashedAt != null }
         override suspend fun purgeNote(id: String) {
             notes.remove(id)
+        }
+    }
+
+    /** 日程仓库替身：记录创建的日程，可注入保存失败。 */
+    private class FakeCalendarRepository : CalendarRepository {
+        val entries = LinkedHashMap<String, CalendarEntry>()
+        var failNextUpsert: String? = null
+
+        override fun observeEntries(): Flow<List<CalendarEntry>> =
+            flowOf(entries.values.filter { it.trashedAt == null })
+
+        override suspend fun getEntry(id: String): CalendarEntry? = entries[id]
+        override suspend fun getEntriesLinkedToTask(taskId: String): List<CalendarEntry> =
+            entries.values.filter { it.taskId == taskId }
+
+        override suspend fun upsertEntry(entry: CalendarEntry) {
+            failNextUpsert?.let { msg ->
+                failNextUpsert = null
+                throw IllegalStateException(msg)
+            }
+            entries[entry.id] = entry
+        }
+
+        override suspend fun trashEntry(id: String, trashedAtMillis: Long) {
+            entries[id]?.let { entries[id] = it.copy(trashedAt = trashedAtMillis) }
+        }
+
+        override fun observeTrashedEntries(): Flow<List<CalendarEntry>> =
+            flowOf(entries.values.filter { it.trashedAt != null })
+
+        override suspend fun listTrashedEntries(): List<CalendarEntry> = entries.values.filter { it.trashedAt != null }
+        override suspend fun purgeEntry(id: String) {
+            entries.remove(id)
+        }
+    }
+
+    /** 日程提醒仓库替身：记录设置的提醒，可注入保存失败。 */
+    private class FakeCalendarRemindersRepository : CalendarRemindersRepository {
+        val reminders = LinkedHashMap<String, Reminder>()
+        var failNextUpsert: String? = null
+
+        override fun observeByEntry(entryId: String): Flow<List<Reminder>> =
+            flowOf(reminders.values.filter { it.taskId == entryId })
+
+        override suspend fun listByEntry(entryId: String): List<Reminder> =
+            reminders.values.filter { it.taskId == entryId }
+
+        override suspend fun get(id: String): Reminder? = reminders[id]
+        override suspend fun upsert(reminder: Reminder) {
+            failNextUpsert?.let { msg ->
+                failNextUpsert = null
+                throw IllegalStateException(msg)
+            }
+            reminders[reminder.id] = reminder
+        }
+
+        override suspend fun delete(id: String) {
+            reminders.remove(id)
+        }
+
+        override suspend fun deleteByEntry(entryId: String) {
+            reminders.keys.removeAll { key -> reminders[key]?.taskId == entryId }
+        }
+    }
+
+    /** 记录调用的调度器替身（模式同 CalendarReminderUseCasesTest），可切换精确闹钟能力与调度结果。 */
+    private class AiFakeAlarmScheduler : AlarmScheduler {
+        var exactAllowed: Boolean = true
+        var scheduleResult: Boolean = true
+
+        val exactCalls = mutableListOf<Pair<String, Long>>()
+        val inexactCalls = mutableListOf<Pair<String, Long>>()
+        val cancelled = mutableListOf<String>()
+
+        override fun canScheduleExact(): Boolean = exactAllowed
+
+        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+            exactCalls += reminderId to triggerAtMillis
+            return scheduleResult
+        }
+
+        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+            inexactCalls += reminderId to triggerAtMillis
+            return scheduleResult
+        }
+
+        override fun cancel(reminderId: String) {
+            cancelled += reminderId
         }
     }
 }
