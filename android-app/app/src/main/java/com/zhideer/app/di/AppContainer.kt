@@ -3,6 +3,7 @@ package com.zhideer.app.di
 import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import com.zhideer.app.data.ai.AdvisorRecordStore
 import com.zhideer.app.data.ai.AiConfigStore
 import com.zhideer.app.data.ai.AiProposalStore
 import com.zhideer.app.data.ai.AiSessionStore
@@ -390,6 +391,11 @@ class AppContainer(
         HomeUseCases(taskUseCases, calendarUseCases, zoneId, nowMillis)
     }
 
+    // T30/#31 纯新增：参谋反馈、采纳执行记录与提案依据绑定（DataStore JSON，不进 Room、不写长期记忆）
+    val advisorRecordStore: AdvisorRecordStore by lazy {
+        AdvisorRecordStore(File(context.filesDir, "advisor_records.preferences_pb"))
+    }
+
     val advisorUseCases: AdvisorUseCases by lazy {
         AdvisorUseCases(
             taskUseCases = taskUseCases,
@@ -397,6 +403,9 @@ class AppContainer(
             memoryUseCases = memoryUseCases,
             authorizer = aiContextAuthorizer,
             proposalStore = aiProposalStore,
+            // T30/#31 纯新增：反馈/采纳记录持久化 + 确认执行复用既有提案状态机
+            recordStore = advisorRecordStore,
+            proposalUseCases = aiProposalUseCases,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,

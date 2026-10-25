@@ -220,6 +220,9 @@ data class AiProposal(
     val createdScheduleIds: List<String> = emptyList(),
     val createdMemoryIds: List<String> = emptyList(),
     val resultMessage: String? = null,
+    // T30/#31 纯新增：真实执行是否全部成功（成功才标记采纳；失败/部分失败不标记）。
+    // 可空以兼容既有持久化提案 JSON：旧提案按回执文本判断（见 AdvisorUseCases）。
+    val executionSucceeded: Boolean? = null,
 )
 
 /** [AiChatUseCases.sendProposalRequest] 的解析结果（发送层只解析，不落提案库）。 */
@@ -237,3 +240,89 @@ sealed interface AiProposalSendOutcome {
 
     data class ProposalCreated(val session: AiChatSession, val proposal: AiProposal) : AiProposalSendOutcome
 }
+
+// ---------- T30/#31：参谋建议反馈与采纳执行记录（DataStore JSON，不进 Room、不进长期记忆） ----------
+
+/**
+ * 参谋建议反馈类型（T30/#31）：
+ * - [IGNORE] 忽略本次建议；
+ * - [ADJUST] 调整建议（保存用户写下的调整说明，供后续重新生成时参考追溯）；
+ * - [NEVER_SUGGEST] 不再建议同一建议（只过滤该建议，不推断长期人格标签）。
+ * 反馈只用于追溯与后续建议过滤，**不直接写入长期记忆**（GLOSSARY：长期记忆只经用户显式确认保存）。
+ */
+@Serializable
+enum class AdvisorFeedbackType { IGNORE, ADJUST, NEVER_SUGGEST }
+
+/**
+ * 建议依据记录的只读快照（T30/#31）：记录 id、展示信息与内容指纹。
+ * 采纳前与确认前都重新读取真实记录比对指纹；记录被修改、完成、删除或失效后，
+ * 旧建议/旧提案不可直接执行，必须重新生成建议并再次确认（验收：拒绝过期操作）。
+ */
+@Serializable
+data class AdvisorEvidenceSnapshot(
+    val recordKind: AiProposalKind,
+    val recordId: String,
+    val title: String,
+    val detail: String,
+    val recordFingerprint: String = "",
+)
+
+/** 一条可追溯的参谋建议反馈记录（T30/#31）：建议、依据、类型、调整说明与时间。 */
+@Serializable
+data class AdvisorFeedbackRecord(
+    val id: String,
+    val suggestionId: String,
+    val suggestionKind: String,
+    val title: String,
+    val type: AdvisorFeedbackType,
+    val adjustmentNote: String = "",
+    val evidence: List<AdvisorEvidenceSnapshot> = emptyList(),
+    val createdAt: Long,
+)
+
+/**
+ * 采纳执行结果（T30/#31）：
+ * - [ADOPTED] 真实执行成功（唯一表示已采纳的状态）；
+ * - [FAILED] 执行失败或部分失败（不标已采纳）；
+ * - [CANCELLED] 用户取消采纳（不标已采纳）；
+ * - [UNKNOWN] 执行中或进程中断导致结果未知（不标已采纳，待核对真实记录）；
+ * - [INVALIDATED] 依据记录已变化，旧提案失效未执行（不标已采纳，须重新生成）。
+ */
+@Serializable
+enum class AdvisorAdoptionOutcome { ADOPTED, FAILED, CANCELLED, UNKNOWN, INVALIDATED }
+
+/** 一条采纳执行记录（T30/#31）：按提案 id 唯一，供重复采纳与响应丢失后核对真实结果。 */
+@Serializable
+data class AdvisorAdoptionRecord(
+    val id: String,
+    val suggestionId: String,
+    val suggestionKind: String,
+    val title: String,
+    val proposalId: String,
+    val outcome: AdvisorAdoptionOutcome,
+    val detail: String = "",
+    val createdAt: Long,
+)
+
+/**
+ * 建议与操作提案的绑定（T30/#31）：落提案时保存依据快照与指纹，
+ * 确认前按指纹重新核对依据是否仍与生成时一致；不一致即让旧提案失效。
+ */
+@Serializable
+data class AdvisorProposalBinding(
+    val proposalId: String,
+    val suggestionId: String,
+    val suggestionKind: String,
+    val title: String,
+    val evidence: List<AdvisorEvidenceSnapshot> = emptyList(),
+    val basisFingerprint: String,
+    val createdAt: Long,
+)
+
+/** 参谋建议相关记录的持久化集合（T30/#31）：反馈、采纳执行记录、提案绑定。 */
+@Serializable
+data class AdvisorRecords(
+    val feedback: List<AdvisorFeedbackRecord> = emptyList(),
+    val adoptions: List<AdvisorAdoptionRecord> = emptyList(),
+    val bindings: List<AdvisorProposalBinding> = emptyList(),
+)
