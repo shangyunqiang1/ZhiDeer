@@ -25,6 +25,10 @@ class RemindersRepositoryImpl(
         reminderDao.listByTask(taskId).map { it.toModel() }
     }
 
+    override suspend fun listAll(): List<Reminder> = withContext(ioDispatcher) {
+        reminderDao.listAll().map { it.toModel() }
+    }
+
     override suspend fun get(id: String): Reminder? = withContext(ioDispatcher) {
         reminderDao.get(id)?.toModel()
     }

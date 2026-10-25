@@ -3,6 +3,7 @@ package com.zhideer.app.di
 import android.content.Context
 import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import com.zhideer.app.data.ai.AdvisorRecordStore
 import com.zhideer.app.data.ai.AiConfigStore
 import com.zhideer.app.data.ai.AiProposalStore
 import com.zhideer.app.data.ai.AiSessionStore
@@ -16,6 +17,7 @@ import com.zhideer.app.data.repository.ClockHandoffRepositoryImpl
 import com.zhideer.app.data.repository.MemoriesRepositoryImpl
 import com.zhideer.app.data.repository.NotesRepositoryImpl
 import com.zhideer.app.data.repository.OccurrenceSubTaskRecordsRepositoryImpl
+import com.zhideer.app.data.repository.ReminderScheduleLogRepositoryImpl
 import com.zhideer.app.data.repository.RemindersRepositoryImpl
 import com.zhideer.app.data.repository.SubTasksRepositoryImpl
 import com.zhideer.app.data.repository.TaskOccurrenceRepositoryImpl
@@ -24,9 +26,11 @@ import com.zhideer.app.domain.repository.CalendarRemindersRepository
 import com.zhideer.app.domain.repository.CalendarRepository
 import com.zhideer.app.domain.repository.ClockHandoffRepository
 import com.zhideer.app.domain.model.MemoryRefType
+import com.zhideer.app.domain.model.ReminderRestoreTrigger
 import com.zhideer.app.domain.repository.MemoriesRepository
 import com.zhideer.app.domain.repository.NotesRepository
 import com.zhideer.app.domain.repository.OccurrenceSubTaskRecordsRepository
+import com.zhideer.app.domain.repository.ReminderScheduleLogRepository
 import com.zhideer.app.domain.repository.RemindersRepository
 import com.zhideer.app.domain.repository.SubTasksRepository
 import com.zhideer.app.domain.repository.TaskOccurrenceRepository
@@ -48,6 +52,7 @@ import com.zhideer.app.domain.usecase.OccurrenceSubTaskUseCases
 import com.zhideer.app.domain.usecase.RecycleBinKind
 import com.zhideer.app.domain.usecase.RecycleBinUseCases
 import com.zhideer.app.domain.usecase.RecurrenceUseCases
+import com.zhideer.app.domain.usecase.ReminderRestoreUseCases
 import com.zhideer.app.domain.usecase.ReminderUseCases
 import com.zhideer.app.domain.usecase.SubTaskUseCases
 import com.zhideer.app.domain.usecase.TaskScheduleLinkUseCases
@@ -57,10 +62,16 @@ import com.zhideer.app.domain.usecase.VoicePlaybackController
 import com.zhideer.app.platform.AlarmScheduler
 import com.zhideer.app.platform.AndroidClockLauncher
 import com.zhideer.app.platform.AndroidNotificationPoster
+import com.zhideer.app.platform.AndroidReminderCapabilityProbe
+import com.zhideer.app.platform.AndroidReminderFixLauncher
 import com.zhideer.app.platform.AndroidSpeechInput
 import com.zhideer.app.platform.AndroidSpeechOutput
 import com.zhideer.app.platform.NotificationPoster
 import com.zhideer.app.platform.PlatformAlarmScheduler
+import com.zhideer.app.platform.ReminderCapabilityProbe
+import com.zhideer.app.platform.ReminderDeliveryRecorder
+import com.zhideer.app.platform.ReminderFixLauncher
+import com.zhideer.app.platform.ScheduleLedgerAlarmScheduler
 import com.zhideer.app.platform.SpeechInput
 import com.zhideer.app.platform.SpeechOutput
 import kotlinx.coroutines.CoroutineScope
@@ -92,7 +103,8 @@ class AppContainer(
         .setDriver(BundledSQLiteDriver())
         .setQueryCoroutineContext(Dispatchers.IO)
         // T06/#7（日程外键 taskId）与 T07/#8（sub_tasks 子任务表）合并后数据库升至 5，
-        // T08/#9（reminders 提醒表）后升至 6。当前应用尚无对外发布的
+        // T08/#9（reminders 提醒表）后升至 6；T10/#11（reminder_schedule_log 调度台账）后升至 15。
+        // 当前应用尚无对外发布的
         // 真实用户数据，暂以破坏性迁移兜底（旧库重建，不保留历史数据）；
         // 接入真实用户数据前必须替换为保留数据的正式迁移。
         .fallbackToDestructiveMigration()
@@ -128,7 +140,21 @@ class AppContainer(
     // T08/#9 提醒：平台适配器与用例先于待办用例组装，供截止变化/取消/删除的联动钩子引用。
     val remindersRepository: RemindersRepository = RemindersRepositoryImpl(database.reminderDao(), Dispatchers.IO)
 
-    val alarmScheduler: AlarmScheduler = PlatformAlarmScheduler(context)
+    // T10/#11 系统调度台账：记录“已调度/已投递/错过”，供设备变化后恢复与合并错过提示。
+    val reminderScheduleLogRepository: ReminderScheduleLogRepository =
+        ReminderScheduleLogRepositoryImpl(database.reminderScheduleLogDao(), Dispatchers.IO)
+
+    // T10/#11：所有真实调度经台账装饰器，提交成功后记“已调度”，取消时移除待投递台账。
+    val alarmScheduler: AlarmScheduler = ScheduleLedgerAlarmScheduler(
+        delegate = PlatformAlarmScheduler(context),
+        scheduleLogRepository = reminderScheduleLogRepository,
+        now = nowMillis,
+    )
+
+    // T10/#11 设备能力探针与修复入口：只读状态、跳系统设置由用户本人授权/调整。
+    val reminderCapabilityProbe: ReminderCapabilityProbe = AndroidReminderCapabilityProbe(context)
+
+    val reminderFixLauncher: ReminderFixLauncher = AndroidReminderFixLauncher(appContext)
 
     val notificationPoster: NotificationPoster = AndroidNotificationPoster(context)
 
@@ -225,6 +251,23 @@ class AppContainer(
         },
     )
 
+    // T10/#11 设备变化恢复：重启/时间/时区/权限变化与应用启动统一经本入口；
+    // 恢复复用上面两个提醒用例的既有调度规则，只重建调度，不改动任何业务记录。
+    val reminderRestoreUseCases: ReminderRestoreUseCases = ReminderRestoreUseCases(
+        tasksRepository = tasksRepository,
+        calendarRepository = calendarRepository,
+        remindersRepository = remindersRepository,
+        calendarRemindersRepository = calendarRemindersRepository,
+        scheduleLogRepository = reminderScheduleLogRepository,
+        reminderUseCases = reminderUseCases,
+        calendarReminderUseCases = calendarReminderUseCases,
+        taskUseCases = taskUseCases,
+        calendarUseCases = calendarUseCases,
+        capabilityProbe = reminderCapabilityProbe,
+        now = nowMillis,
+        deviceZone = { ZoneId.systemDefault() },
+    )
+
     val notesRepository: NotesRepository = NotesRepositoryImpl(database.noteDao(), Dispatchers.IO)
 
     val noteUseCases: NoteUseCases = NoteUseCases(
@@ -286,6 +329,42 @@ class AppContainer(
             }
         }
     }
+
+    /**
+     * T10/#11 应用启动时调用：按真实本地记录恢复提醒（重建未来调度、合并错过提示）。
+     * 与重启/时间/时区/权限广播共用同一恢复入口，重复执行幂等。
+     */
+    fun restoreRemindersOnStartup() {
+        cleanupScope.launch {
+            runCatching { reminderRestoreUseCases.restore(ReminderRestoreTrigger.APP_START) }
+        }
+    }
+
+    /** T10/#11 界面回到前台时调用：用户可能刚在系统设置改动通知/精确提醒/省电限制，刷新状态与调度。 */
+    fun refreshReminderStatusOnResume() {
+        cleanupScope.launch {
+            runCatching { reminderRestoreUseCases.restore(ReminderRestoreTrigger.MANUAL) }
+        }
+    }
+
+    /**
+     * T10/#11 提醒投递记录器：接收器只在通知真实投递成功后调用；异步写台账，
+     * 失败不影响通知本身。设备变化恢复据此区分已投递与错过。
+     */
+    val reminderDeliveryRecorder: ReminderDeliveryRecorder =
+        ReminderDeliveryRecorder { reminderKey, ownerId, ownerTitle, scheduledAtMillis ->
+            cleanupScope.launch {
+                runCatching {
+                    reminderScheduleLogRepository.markDelivered(
+                        reminderKey = reminderKey,
+                        ownerId = ownerId,
+                        ownerTitle = ownerTitle,
+                        scheduledAtMillis = scheduledAtMillis,
+                        deliveredAtMillis = nowMillis(),
+                    )
+                }
+            }
+        }
 
     // —— AI 对话（T17/#18）：纯新增装配，不改动既有依赖 ——
     // API Key 存本机加密存储（EncryptedSharedPreferences，主密钥 AndroidKeystore）；
@@ -396,6 +475,11 @@ class AppContainer(
         HomeUseCases(taskUseCases, calendarUseCases, zoneId, nowMillis)
     }
 
+    // T30/#31 纯新增：参谋反馈、采纳执行记录与提案依据绑定（DataStore JSON，不进 Room、不写长期记忆）
+    val advisorRecordStore: AdvisorRecordStore by lazy {
+        AdvisorRecordStore(File(context.filesDir, "advisor_records.preferences_pb"))
+    }
+
     val advisorUseCases: AdvisorUseCases by lazy {
         AdvisorUseCases(
             taskUseCases = taskUseCases,
@@ -403,6 +487,9 @@ class AppContainer(
             memoryUseCases = memoryUseCases,
             authorizer = aiContextAuthorizer,
             proposalStore = aiProposalStore,
+            // T30/#31 纯新增：反馈/采纳记录持久化 + 确认执行复用既有提案状态机
+            recordStore = advisorRecordStore,
+            proposalUseCases = aiProposalUseCases,
             idGen = { UUID.randomUUID().toString() },
             now = nowMillis,
             zoneId = zoneId,

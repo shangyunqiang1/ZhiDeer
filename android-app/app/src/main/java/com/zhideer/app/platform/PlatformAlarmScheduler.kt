@@ -22,7 +22,7 @@ class PlatformAlarmScheduler(private val context: Context) : AlarmScheduler {
     override fun canScheduleExact(): Boolean =
         Build.VERSION.SDK_INT < 31 || alarmManager.canScheduleExactAlarms()
 
-    override fun scheduleExact(
+    override suspend fun scheduleExact(
         reminderId: String,
         triggerAtMillis: Long,
         taskId: String,
@@ -33,12 +33,12 @@ class PlatformAlarmScheduler(private val context: Context) : AlarmScheduler {
             alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
                 triggerAtMillis,
-                pendingIntent(reminderId, taskId, title),
+                pendingIntent(reminderId, triggerAtMillis, taskId, title),
             )
         }.isSuccess
     }
 
-    override fun scheduleInexact(
+    override suspend fun scheduleInexact(
         reminderId: String,
         triggerAtMillis: Long,
         taskId: String,
@@ -47,17 +47,22 @@ class PlatformAlarmScheduler(private val context: Context) : AlarmScheduler {
         alarmManager.setAndAllowWhileIdle(
             AlarmManager.RTC_WAKEUP,
             triggerAtMillis,
-            pendingIntent(reminderId, taskId, title),
+            pendingIntent(reminderId, triggerAtMillis, taskId, title),
         )
     }.isSuccess
 
-    override fun cancel(reminderId: String) {
+    override suspend fun cancel(reminderId: String) {
         // 与设置时相同的 requestCode 与 Intent 重建 PendingIntent，确保命中同一条闹钟
-        alarmManager.cancel(pendingIntent(reminderId, taskId = "", title = ""))
+        alarmManager.cancel(pendingIntent(reminderId, 0L, taskId = "", title = ""))
     }
 
-    private fun pendingIntent(reminderId: String, taskId: String, title: String): PendingIntent {
-        val intent = ReminderAlarmReceiver.buildIntent(context, reminderId, taskId, title)
+    private fun pendingIntent(
+        reminderId: String,
+        triggerAtMillis: Long,
+        taskId: String,
+        title: String,
+    ): PendingIntent {
+        val intent = ReminderAlarmReceiver.buildIntent(context, reminderId, taskId, title, triggerAtMillis)
         return PendingIntent.getBroadcast(
             context,
             reminderId.hashCode(),

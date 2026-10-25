@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.Flow
 interface CalendarRemindersRepository {
     fun observeByEntry(entryId: String): Flow<List<Reminder>>
     suspend fun listByEntry(entryId: String): List<Reminder>
+
+    /** 设备变化恢复（T10/#11）：全部日程提醒，按真实本地记录重建调度。 */
+    suspend fun listAll(): List<Reminder>
     suspend fun get(id: String): Reminder?
     suspend fun upsert(reminder: Reminder)
     suspend fun delete(id: String)

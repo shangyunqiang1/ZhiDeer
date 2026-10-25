@@ -1,5 +1,6 @@
 package com.zhideer.app
 
+import com.zhideer.app.data.ai.AdvisorRecordStore
 import com.zhideer.app.data.ai.AiProposalStore
 import com.zhideer.app.domain.model.AiProposalKind
 import com.zhideer.app.domain.model.AiProposalOp
@@ -67,6 +68,7 @@ class AdvisorUseCasesTest {
 
     private lateinit var storeDir: File
     private lateinit var proposalStore: AiProposalStore
+    private lateinit var recordStore: AdvisorRecordStore
     private lateinit var fakeTasks: FakeTasksRepository
     private lateinit var fakeOccurrences: FakeTaskOccurrenceRepository
     private lateinit var fakeCalendar: FakeCalendarRepository
@@ -80,6 +82,7 @@ class AdvisorUseCasesTest {
         storeDir = File(System.getProperty("java.io.tmpdir"), "t29-test-${System.nanoTime()}")
         check(storeDir.mkdirs() || storeDir.isDirectory) { "无法创建测试目录" }
         proposalStore = AiProposalStore(File(storeDir, "ai_proposals.preferences_pb"))
+        recordStore = AdvisorRecordStore(File(storeDir, "advisor_records.preferences_pb"))
         fakeTasks = FakeTasksRepository()
         fakeOccurrences = FakeTaskOccurrenceRepository()
         fakeCalendar = FakeCalendarRepository()
@@ -109,6 +112,7 @@ class AdvisorUseCasesTest {
             memoryUseCases = memories,
             authorizer = authorizer,
             proposalStore = proposalStore,
+            recordStore = recordStore,
             idGen = { "proposal-advisor" },
             now = { NOW },
             zoneId = ZONE,
@@ -118,6 +122,7 @@ class AdvisorUseCasesTest {
     @After
     fun tearDown() {
         proposalStore.close()
+        recordStore.close()
         storeDir.deleteRecursively()
     }
 
@@ -626,6 +631,7 @@ class AdvisorUseCasesTest {
             flowOf(emptyList())
 
         override suspend fun listByEntry(entryId: String): List<com.zhideer.app.domain.model.Reminder> = emptyList()
+        override suspend fun listAll(): List<com.zhideer.app.domain.model.Reminder> = emptyList()
         override suspend fun get(id: String): com.zhideer.app.domain.model.Reminder? = null
         override suspend fun upsert(reminder: com.zhideer.app.domain.model.Reminder) =
             throw UnsupportedOperationException("本测试不应写提醒")
@@ -636,12 +642,12 @@ class AdvisorUseCasesTest {
 
     private class NoopAlarmScheduler : com.zhideer.app.platform.AlarmScheduler {
         override fun canScheduleExact(): Boolean = false
-        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
+        override suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
             throw UnsupportedOperationException("本测试不应调度提醒")
 
-        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
+        override suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean =
             throw UnsupportedOperationException("本测试不应调度提醒")
 
-        override fun cancel(reminderId: String) = throw UnsupportedOperationException("本测试不应取消提醒")
+        override suspend fun cancel(reminderId: String) = throw UnsupportedOperationException("本测试不应取消提醒")
     }
 }

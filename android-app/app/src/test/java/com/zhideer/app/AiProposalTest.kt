@@ -1600,6 +1600,8 @@ class AiProposalTest {
         override suspend fun listByEntry(entryId: String): List<Reminder> =
             reminders.values.filter { it.taskId == entryId }
 
+        override suspend fun listAll(): List<Reminder> = reminders.values.toList()
+
         override suspend fun get(id: String): Reminder? = reminders[id]
         override suspend fun upsert(reminder: Reminder) {
             failNextUpsert?.let { msg ->
@@ -1629,17 +1631,17 @@ class AiProposalTest {
 
         override fun canScheduleExact(): Boolean = exactAllowed
 
-        override fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+        override suspend fun scheduleExact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
             exactCalls += reminderId to triggerAtMillis
             return scheduleResult
         }
 
-        override fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
+        override suspend fun scheduleInexact(reminderId: String, triggerAtMillis: Long, taskId: String, title: String): Boolean {
             inexactCalls += reminderId to triggerAtMillis
             return scheduleResult
         }
 
-        override fun cancel(reminderId: String) {
+        override suspend fun cancel(reminderId: String) {
             cancelled += reminderId
         }
     }

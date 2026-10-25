@@ -20,6 +20,10 @@ interface CalendarReminderDao {
     @Query("SELECT * FROM calendar_reminders WHERE id = :id")
     suspend fun get(id: String): CalendarReminderEntity?
 
+    /** 设备变化恢复（T10/#11）：一次性读取全部日程提醒，按真实本地记录重建调度。 */
+    @Query("SELECT * FROM calendar_reminders ORDER BY createdAt ASC, id ASC")
+    suspend fun listAll(): List<CalendarReminderEntity>
+
     @Upsert
     suspend fun upsert(reminder: CalendarReminderEntity)
 

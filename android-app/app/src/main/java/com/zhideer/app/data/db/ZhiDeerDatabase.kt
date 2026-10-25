@@ -4,6 +4,8 @@ import androidx.room3.Database
 import androidx.room3.RoomDatabase
 
 /**
+ * version 15：T10/#11 新增 reminder_schedule_log 系统调度台账表（已调度/已投递/错过），
+ * 供设备重启、时间/时区变化与权限变化后恢复提醒并合并错过提示。
  * version 14：T24/#25 新增 clock_handoffs 系统闹钟交接记录表（只记录本应用发起的
  * 待核对请求，无法读取系统闹钟内容）。
  * 历史：version 13：合并 T27/#28（memories 纯新增来源引用拆列 sourceRefType/sourceRefId/
@@ -38,8 +40,9 @@ import androidx.room3.RoomDatabase
         OccurrenceSubTaskRecordEntity::class,
         MemoryEntity::class,
         ClockHandoffEntity::class,
+        ReminderScheduleEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = true,
 )
 abstract class ZhiDeerDatabase : RoomDatabase() {
@@ -53,6 +56,9 @@ abstract class ZhiDeerDatabase : RoomDatabase() {
     abstract fun occurrenceSubTaskRecordDao(): OccurrenceSubTaskRecordDao
     abstract fun memoryDao(): MemoryDao
     abstract fun clockHandoffDao(): ClockHandoffDao
+
+    /** T10/#11：系统调度台账（已调度/已投递/错过），供设备变化恢复使用。 */
+    abstract fun reminderScheduleLogDao(): ReminderScheduleLogDao
 
     companion object {
         const val NAME = "zhideer.db"

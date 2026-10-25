@@ -19,6 +19,10 @@ interface ReminderDao {
     @Query("SELECT * FROM reminders WHERE id = :id")
     suspend fun get(id: String): ReminderEntity?
 
+    /** 设备变化恢复（T10/#11）：一次性读取全部待办提醒，按真实本地记录重建调度。 */
+    @Query("SELECT * FROM reminders ORDER BY createdAt ASC, id ASC")
+    suspend fun listAll(): List<ReminderEntity>
+
     @Upsert
     suspend fun upsert(reminder: ReminderEntity)
 
