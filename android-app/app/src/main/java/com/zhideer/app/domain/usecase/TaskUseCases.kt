@@ -34,6 +34,13 @@ class TaskUseCases(
     // AppContainer 组装后注册为 SubTaskUseCases::trashForParent，
     // 保证父子一起删除保留完整关系。现有语义与既有调用不受影响。
     private val onTrashed: suspend (taskId: String) -> Unit = {},
+    // T08/#9 纯新增：待办截止编辑/延期成功后的提醒重算钩子，默认无操作；
+    // AppContainer 组装后注册为 ReminderUseCases::rescheduleForDueChange，
+    // 相对提醒随截止移动、独立时刻提醒不动。不改既有语义。
+    private val onDueChanged: suspend (taskId: String) -> Unit = {},
+    // T08/#9 纯新增：待办取消成功后的提醒停止钩子，默认无操作
+    // （GLOSSARY：取消待办同时停止该待办自身的提醒）。不改既有语义。
+    private val onCancelled: suspend (taskId: String) -> Unit = {},
 ) {
 
     suspend fun create(input: TaskInput): Result<TodoTask> {
@@ -72,6 +79,7 @@ class TaskUseCases(
             updatedAt = now(),
         )
         repository.upsertTask(updated)
+        onDueChanged(id)
         return Result.success(updated)
     }
 
@@ -106,10 +114,11 @@ class TaskUseCases(
             updatedAt = t,
         )
         repository.upsertTask(updated)
+        onDueChanged(id)
         return Result.success(updated)
     }
 
-    /** 取消：决定不再执行并保留业务记录，同时与删除区分。 */
+    /** 取消：决定不再执行并保留业务记录，同时与删除区分；提醒一并停止（#9）。 */
     suspend fun cancel(id: String): Result<TodoTask> {
         val current = repository.getTask(id)
             ?: return Result.failure(IllegalStateException("待办不存在或已永久删除"))
@@ -120,6 +129,7 @@ class TaskUseCases(
             updatedAt = t,
         )
         repository.upsertTask(updated)
+        onCancelled(id)
         return Result.success(updated)
     }
 
