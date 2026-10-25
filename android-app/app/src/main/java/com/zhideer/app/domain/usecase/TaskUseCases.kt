@@ -48,6 +48,11 @@ class TaskUseCases(
     // T08/#9 纯新增：待办取消成功后的提醒停止钩子，默认无操作
     // （GLOSSARY：取消待办同时停止该待办自身的提醒）。不改既有语义。
     private val onCancelled: suspend (taskId: String) -> Unit = {},
+    // T11/#12 纯新增：待办完成/撤销完成成功后的提醒联动钩子，默认无操作。
+    // AppContainer 组装后注册为：完成时停止该待办自身全部提醒
+    // （issue #12：完成待办停止其自身不再适用的提醒）；撤销完成不动作——
+    // 已停止的提醒不自动恢复（不假装恢复，界面如实提示需重新设置）。不改既有语义。
+    private val onCompleted: suspend (taskId: String, completed: Boolean) -> Unit = { _, _ -> },
     // T12/#13 纯新增：重复出现完成记录仓库（可空 = 不启用重复能力）。
     // 供列表过滤合成“下一次未完成出现”状态，以及把整体完成转发为单次出现完成。
     private val occurrenceRepository: TaskOccurrenceRepository? = null,
@@ -115,6 +120,9 @@ class TaskUseCases(
             updatedAt = t,
         )
         repository.upsertTask(updated)
+        // T11/#12：完成待办联动停止其自身全部提醒；撤销完成不触发——
+        // 已停止的提醒不自动恢复（不假装恢复），状态与时间戳照常保留。
+        if (completed) onCompleted(id, completed)
         return Result.success(updated)
     }
 
